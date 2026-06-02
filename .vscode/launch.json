@@ -1,0 +1,40 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Shellmate Electron",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Shellmate",
+      "program": "${workspaceFolder}/Shellmate/bin/Debug/net10.0/win-x64/Shellmate.exe",
+      "args": [
+        "--electron"
+      ],
+      "cwd": "${workspaceFolder}/Shellmate",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    {
+      "name": "Shellmate Web",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Shellmate",
+      "program": "${workspaceFolder}/Shellmate/bin/Debug/net10.0/win-x64/Shellmate.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/Shellmate",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ASPNETCORE_URLS": "http://localhost:1455"
+      },
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "\\bNow listening on:\\s+(https?://\\S+)"
+      }
+    }
+  ]
+}

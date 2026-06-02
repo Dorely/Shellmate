@@ -1,0 +1,11 @@
+.workspace {
+    height: 100vh;
+    min-height: 0;
+    display: grid;
+    background: #f7f8fa;
+}
+
+.workspace-main {
+    min-height: 0;
+    height: 100%;
+}

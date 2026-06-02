@@ -1,0 +1,174 @@
+@page "/"
+@page "/chat"
+@using Shellmate.Chat
+@using Shellmate.Llm
+@using Shellmate.Models
+@rendermode InteractiveServer
+@inject IAssistantChatService ChatService
+@inject ILlmProviderService ProviderService
+
+<PageTitle>Shellmate Chat</PageTitle>
+
+<div class="workspace">
+    <section class="workspace-main">
+        <ChatSurface Title="Shellmate"
+                     Subtitle="@_providerSubtitle"
+                     Loading="@_loading"
+                     Messages="@_messages"
+                     Live="@_live"
+                     Error="@_error"
+                     Input="@_input"
+                     InputChanged="OnInputChanged"
+                     Placeholder="Ask Shellmate..."
+                     Running="@_running"
+                     ComposerDisabled="@(_loading || !_hasWorkingProvider)"
+                     SendDisabled="@(_loading || _running || !_hasWorkingProvider || string.IsNullOrWhiteSpace(_input))"
+                     ForceScrollKey="@_forceScrollKey"
+                     ScrollKey="@_scrollKey"
+                     ResetComposerKey="@_resetComposerKey"
+                     OnSend="SendAsync"
+                     OnStop="StopAsync"
+                     OnClearError="ClearError">
+            <HeaderActions>
+                <a class="btn btn-sm btn-outline-secondary" href="settings/providers">Providers</a>
+                <button type="button" class="btn btn-sm btn-outline-danger" disabled="@_running" @onclick="ResetAsync">Reset</button>
+            </HeaderActions>
+        </ChatSurface>
+    </section>
+</div>
+
+@code {
+    private readonly List<ChatRenderableMessage> _messages = [];
+    private ChatLiveTurn? _live;
+    private CancellationTokenSource? _turnCts;
+    private string _input = string.Empty;
+    private string? _error;
+    private string _providerSubtitle = "Checking provider status...";
+    private bool _loading = true;
+    private bool _running;
+    private bool _hasWorkingProvider;
+    private int _forceScrollKey;
+    private int _scrollKey;
+    private int _resetComposerKey;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _messages.Clear();
+
+        var conversation = await ChatService.GetOrCreateAsync();
+        var messages = await ChatService.LoadMessagesAsync(conversation.Id);
+        _messages.AddRange(messages.Select(ToRenderable));
+
+        var availability = await ProviderService.GetDefaultChatProviderAvailabilityAsync();
+        _hasWorkingProvider = availability.IsAvailable && availability.Provider is not null;
+        _providerSubtitle = _hasWorkingProvider
+            ? $"Default provider: {availability.Provider!.DisplayName ?? availability.Provider.Name} / {availability.Provider.ModelId}"
+            : availability.Message;
+
+        _loading = false;
+        _forceScrollKey++;
+    }
+
+    private Task OnInputChanged(string value)
+    {
+        _input = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task SendAsync()
+    {
+        if (_running || string.IsNullOrWhiteSpace(_input))
+            return;
+
+        var text = _input.Trim();
+        _input = string.Empty;
+        _resetComposerKey++;
+        _error = null;
+        _running = true;
+        _live = new ChatLiveTurn();
+        _turnCts = new CancellationTokenSource();
+
+        _messages.Add(new ChatRenderableMessage(
+            Guid.NewGuid(),
+            ChatMessageRole.User,
+            ChatMessageStatus.Completed,
+            [new ChatTextPart(text)]));
+        _scrollKey++;
+
+        try
+        {
+            await foreach (var update in ChatService.SendAsync(text, _turnCts.Token))
+            {
+                switch (update)
+                {
+                    case AssistantTextDelta delta:
+                        _live.AppendText(delta.Text);
+                        _scrollKey++;
+                        break;
+                    case AssistantTurnError turnError:
+                        _error = turnError.Message;
+                        break;
+                }
+
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        finally
+        {
+            _running = false;
+            _turnCts?.Dispose();
+            _turnCts = null;
+            _live = null;
+            await ReloadAsync();
+        }
+    }
+
+    private Task StopAsync()
+    {
+        _turnCts?.Cancel();
+        return Task.CompletedTask;
+    }
+
+    private async Task ResetAsync()
+    {
+        if (_running)
+            return;
+
+        await ChatService.ResetAsync();
+        _error = null;
+        _input = string.Empty;
+        _resetComposerKey++;
+        await ReloadAsync();
+    }
+
+    private void ClearError()
+    {
+        _error = null;
+    }
+
+    private static ChatRenderableMessage ToRenderable(AssistantMessage message)
+    {
+        var role = message.Role == AssistantMessageRole.User
+            ? ChatMessageRole.User
+            : ChatMessageRole.Assistant;
+        var status = message.Status switch
+        {
+            AssistantMessageStatus.Failed => ChatMessageStatus.Failed,
+            AssistantMessageStatus.Cancelled => ChatMessageStatus.Cancelled,
+            AssistantMessageStatus.Pending => ChatMessageStatus.Pending,
+            _ => ChatMessageStatus.Completed
+        };
+
+        return new ChatRenderableMessage(
+            message.Id,
+            role,
+            status,
+            string.IsNullOrEmpty(message.Content) ? [] : [new ChatTextPart(message.Content)]);
+    }
+}

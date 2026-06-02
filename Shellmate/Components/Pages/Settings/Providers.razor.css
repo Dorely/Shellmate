@@ -1,0 +1,89 @@
+.settings-page {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+.settings-header,
+.section-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.settings-header h1,
+.section-heading h2 {
+    margin: 0 0 0.25rem;
+    color: #17212b;
+}
+
+.settings-header p,
+.section-heading p {
+    margin: 0;
+    color: #667085;
+}
+
+.settings-section {
+    background: #ffffff;
+    border: 1px solid #d9dee7;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.section-actions,
+.action-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.provider-table {
+    min-width: 980px;
+}
+
+.endpoint-input {
+    min-width: 240px;
+}
+
+.model-input {
+    min-width: 150px;
+}
+
+.child-row td {
+    background: #f7f8fa;
+}
+
+.child-form-row td {
+    background: #eef4ff;
+}
+
+.child-form,
+.add-provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    align-items: end;
+    gap: 0.75rem;
+}
+
+.add-provider-default {
+    align-self: center;
+    margin-top: 1.35rem;
+}
+
+.add-provider-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.empty-state {
+    padding: 1rem;
+    border: 1px dashed #c8d0dc;
+    border-radius: 8px;
+    color: #667085;
+    background: #f7f8fa;
+}
