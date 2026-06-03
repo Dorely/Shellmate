@@ -215,6 +215,41 @@ public static class ChatTranscriptHelpers
         }
     }
 
+    public static void AppendLiveTurnForTokenCount(StringBuilder sb, ChatLiveTurn? live)
+    {
+        if (live is null)
+            return;
+
+        foreach (var message in live.Messages)
+        {
+            foreach (var part in message.Parts)
+            {
+                switch (part)
+                {
+                    case ChatTextPart textPart:
+                        var text = textPart.Text.ToString();
+                        if (!string.IsNullOrEmpty(text))
+                            sb.AppendLine(text);
+                        break;
+                    case ChatToolPart toolPart:
+                        AppendToolChipForTokenCount(sb, toolPart.Chip);
+                        break;
+                }
+            }
+        }
+    }
+
+    public static void AppendToolChipForTokenCount(StringBuilder sb, ChatToolChip chip)
+    {
+        sb.Append("Tool: ").Append(chip.Name).Append(' ').AppendLine(chip.CallId);
+        if (chip.HasArguments)
+            sb.Append("Args: ").AppendLine(chip.ArgumentsJson);
+        if (!string.IsNullOrWhiteSpace(chip.Result))
+            sb.Append("Result: ").AppendLine(chip.Result);
+        if (!string.IsNullOrWhiteSpace(chip.Error))
+            sb.Append("Error: ").AppendLine(chip.Error);
+    }
+
     public static string TruncateInline(string value, int max)
     {
         value = value.Replace('\n', ' ').Replace('\r', ' ');

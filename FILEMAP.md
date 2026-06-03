@@ -24,9 +24,9 @@
 
 | File | Description |
 |------|-------------|
-| `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, SSH.NET, Quick.PtyNet, runtime IDs, and warnings-as-errors. |
-| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, shell tools, and routing. |
-| `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, and agent/tool/terminal limits. |
+| `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, tokenizers, SSH.NET, Quick.PtyNet, runtime IDs, and warnings-as-errors. |
+| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, token counting, shell tools, and routing. |
+| `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, agent/tool/terminal limits, and token-counting defaults. |
 | `Properties/launchSettings.json` | Local launch profiles for browser-hosted HTTP and Electron desktop mode on `localhost:1455`. |
 | `Properties/electron-builder.json` | Electron/electron-builder packaging metadata for Windows, Linux, and macOS targets. |
 
@@ -57,8 +57,9 @@
 
 | File | Description |
 |------|-------------|
-| `ChatModels.cs` | UI-only chat transcript/live-turn models, message parts, persisted tool-call helpers, and tool-chip state used by `ChatSurface`. |
-| `ChatSurface.razor` / `.razor.css` / `.razor.js` | Reusable chat shell for text/tool transcript rendering, streaming state, composer autosize, enter-to-send, and scroll-follow behavior. |
+| `ChatModels.cs` | UI-only chat transcript/live-turn models, message parts, persisted tool-call helpers, tool-chip state, and live token-count helpers used by `ChatSurface`. |
+| `ChatTranscriptTokenCounter.cs` | Shared chat transcript token-count adapter for model input: system prompt, tool definitions, persisted messages, pending user text, and live turns. |
+| `ChatSurface.razor` / `.razor.css` / `.razor.js` | Reusable chat shell for text/tool transcript rendering, token badge display, streaming state, composer autosize, enter-to-send, and scroll-follow behavior. |
 | `ChatToolChipView.razor` / `.razor.css` | Expandable generic tool-call chip used for live and persisted shell tool calls. |
 
 ### Components/Terminal/
@@ -79,7 +80,7 @@
 
 | File | Description |
 |------|-------------|
-| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat, terminal session, live tool chips, and terminal password approval modal. |
+| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat with live model-input token count, terminal session, live tool chips, and terminal password approval modal. |
 | `NotFound.razor` | 404 page wired through status-code re-execution. |
 | `Error.razor` | Error page rendered by exception handler middleware. |
 | `Settings/Providers.razor` / `.razor.css` | Provider settings page for OpenAI account OAuth, OpenAI-compatible endpoints, model tests, defaults, API-key updates, and child model rows. |
@@ -156,6 +157,16 @@
 | `LocalTerminalSession.cs` | Quick.PtyNet-backed local shell session with platform shell defaults and PTY cleanup. |
 | `SshTerminalSession.cs` | SSH.NET-backed shell session with password/private-key auth, `xterm-256color`, resize, and host-key trust checks. |
 | `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, snapshots, command records/results, elevation prompts, connect results, and resolved SSH credentials. |
+
+### Tokens/
+
+| File | Description |
+|------|-------------|
+| `ITokenCounter.cs` / `CompositeTokenCounter.cs` | Reusable token counting abstraction; tries exact tiktoken counting first, then falls back to character estimation. |
+| `TokenCountRequest.cs` / `TokenCountResult.cs` | Request/result records for model-or-encoding token counting with method, exactness, and warning metadata. |
+| `TokenCountingOptions.cs` | Configurable default encoding, model-to-encoding mappings, and char-estimator ratio. |
+| `TiktokenTokenCounter.cs` | Exact token counter backed by `Microsoft.ML.Tokenizers` tiktoken encodings. |
+| `CharEstimateTokenCounter.cs` | Conservative fallback token counter based on character length. |
 
 ### Secrets/
 

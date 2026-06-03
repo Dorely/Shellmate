@@ -11,6 +11,7 @@ using Shellmate.Persistence;
 using Shellmate.Persistence.Repositories;
 using Shellmate.Secrets;
 using Shellmate.Terminal;
+using Shellmate.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 var isElectronMode = IsElectronMode(args);
@@ -39,6 +40,10 @@ builder.Services.AddScoped<IAssistantConversationRepository, AssistantConversati
 builder.Services.AddScoped<ITerminalConnectionRepository, TerminalConnectionRepository>();
 builder.Services.AddScoped<ISecretStore, SqliteSecretStore>();
 builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
+builder.Services.Configure<TokenCountingOptions>(builder.Configuration.GetSection(TokenCountingOptions.SectionName));
+builder.Services.AddSingleton<TiktokenTokenCounter>();
+builder.Services.AddSingleton<CharEstimateTokenCounter>();
+builder.Services.AddSingleton<ITokenCounter, CompositeTokenCounter>();
 builder.Services.AddScoped<ILlmProviderService, LlmProviderService>();
 builder.Services.AddScoped<ICodexAuthService, CodexAuthService>();
 builder.Services.AddScoped<IChatClientFactory, ChatClientFactory>();

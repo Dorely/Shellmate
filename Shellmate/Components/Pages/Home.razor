@@ -1,14 +1,20 @@
 @page "/"
 @page "/chat"
+@using System.Text
+@using System.Text.Json
+@using Microsoft.Extensions.AI
 @using Shellmate.Chat
 @using Shellmate.Llm
 @using Shellmate.Models
+@using Shellmate.Tokens
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @inject IAssistantChatService ChatService
 @inject ILlmProviderService ProviderService
 @inject ITerminalConnectionService ConnectionService
 @inject ITerminalSessionService TerminalSession
+@inject AssistantShellTools ShellTools
+@inject ITokenCounter TokenCounter
 @inject NavigationManager Nav
 
 <PageTitle>Shellmate</PageTitle>
@@ -23,6 +29,8 @@ else
         <section class="workspace-chat">
             <ChatSurface Title="Shellmate"
                          Subtitle="@_providerSubtitle"
+                         TokenText="@ConversationTokenText"
+                         TokenTitle="@ConversationTokenTitle"
                          Loading="@_loading"
                          Messages="@_messages"
                          Live="@_live"
@@ -133,12 +141,18 @@ else
 }
 
 @code {
+    private const string ConversationTokenUnitLabel = "input tokens";
+    private const string ConversationTokenTitleLabel = "model input token count";
+
     private readonly List<ChatRenderableMessage> _messages = [];
+    private readonly List<AssistantMessage> _persistedMessages = [];
     private readonly List<TerminalConnection> _connections = [];
+    private List<string> _toolDefinitions = [];
     private ChatLiveTurn? _live;
     private CancellationTokenSource? _turnCts;
     private CancellationTokenSource? _outputCts;
     private TerminalSurface? _terminal;
+    private LlmProvider? _activeProvider;
     private TerminalSize _terminalSize = TerminalSize.Default;
     private TerminalHostKeyPrompt? _hostKeyPrompt;
     private TerminalElevationPrompt? _elevationPrompt;
@@ -147,6 +161,8 @@ else
     private Guid? _focusedElevationPromptId;
     private Guid? _selectedConnectionId;
     private string _input = string.Empty;
+    private string? _pendingUserText;
+    private string _systemPrompt = string.Empty;
     private string _elevationPassword = string.Empty;
     private string? _error;
     private string? _terminalError;
@@ -159,9 +175,18 @@ else
     private bool _terminalReady;
     private bool _redirecting;
     private bool _hasWorkingProvider;
+    private ChatTranscriptTokenCount _conversationTokens = ChatTranscriptTokenCount.Empty;
     private int _forceScrollKey;
     private int _scrollKey;
     private int _resetComposerKey;
+
+    private string? ConversationTokenText => _hasWorkingProvider
+        ? _conversationTokens.Text(ConversationTokenUnitLabel)
+        : null;
+
+    private string? ConversationTokenTitle => _hasWorkingProvider
+        ? _conversationTokens.Title(ConversationTokenTitleLabel)
+        : null;
 
     protected override async Task OnInitializedAsync()
     {
@@ -189,11 +214,13 @@ else
     {
         _loading = true;
         _messages.Clear();
+        _persistedMessages.Clear();
         _connections.Clear();
 
         var conversation = await ChatService.GetOrCreateAsync();
         var persistedMessages = await ChatService.LoadMessagesAsync(conversation.Id);
-        _messages.AddRange(ToRenderable(persistedMessages));
+        _persistedMessages.AddRange(persistedMessages);
+        _messages.AddRange(ToRenderable(_persistedMessages));
         _connections.AddRange(await ConnectionService.ListAsync());
         if (_connections.Count == 0)
         {
@@ -206,9 +233,11 @@ else
 
         var availability = await ProviderService.GetDefaultChatProviderAvailabilityAsync();
         _hasWorkingProvider = availability.IsAvailable && availability.Provider is not null;
+        _activeProvider = _hasWorkingProvider ? availability.Provider : null;
         _providerSubtitle = _hasWorkingProvider
             ? $"Default provider: {availability.Provider!.DisplayName ?? availability.Provider.Name} / {availability.Provider.ModelId}"
             : availability.Message;
+        RefreshConversationTokenInputs();
 
         _loading = false;
         _forceScrollKey++;
@@ -252,6 +281,7 @@ else
                                 break;
                         }
 
+                        RefreshConversationTokenInputs();
                         StateHasChanged();
                     });
                 }
@@ -279,6 +309,7 @@ else
         _error = null;
         _running = true;
         _live = new ChatLiveTurn();
+        _pendingUserText = text;
         _turnCts = new CancellationTokenSource();
 
         _messages.Add(new ChatRenderableMessage(
@@ -286,6 +317,7 @@ else
             ChatMessageRole.User,
             ChatMessageStatus.Completed,
             [new ChatTextPart(text)]));
+        UpdateConversationTokenCount();
         _scrollKey++;
 
         try
@@ -296,18 +328,22 @@ else
                 {
                     case AssistantTextDelta delta:
                         _live.AppendText(delta.Text);
+                        UpdateConversationTokenCount();
                         _scrollKey++;
                         break;
                     case AssistantToolCallStarted started:
                         _live.StartToolCall(started.CallId, started.ToolName, started.ArgumentsJson, started.ArgumentsComplete);
+                        UpdateConversationTokenCount();
                         _scrollKey++;
                         break;
                     case AssistantToolCallArgumentsDelta delta:
                         _live.AppendToolArguments(delta.CallId, delta.ArgumentsDelta, delta.ArgumentsComplete);
+                        UpdateConversationTokenCount();
                         _scrollKey++;
                         break;
                     case AssistantToolCallCompleted completed:
                         _live.CompleteToolCall(completed.CallId, completed.Result, completed.Error, completed.DurationMs);
+                        UpdateConversationTokenCount();
                         _scrollKey++;
                         break;
                     case AssistantTurnError turnError:
@@ -324,6 +360,7 @@ else
             _turnCts?.Dispose();
             _turnCts = null;
             _live = null;
+            _pendingUserText = null;
             await ReloadAsync();
         }
     }
@@ -342,6 +379,8 @@ else
         await ChatService.ResetAsync();
         _error = null;
         _input = string.Empty;
+        _pendingUserText = null;
+        _live = null;
         _resetComposerKey++;
         await ReloadAsync();
     }
@@ -382,6 +421,8 @@ else
                 _terminalError = result.ErrorMessage ?? "Terminal connection failed.";
                 _terminalStatus = "Terminal connection failed.";
             }
+
+            RefreshConversationTokenInputs();
         }
         finally
         {
@@ -394,6 +435,7 @@ else
         await TerminalSession.DisconnectAsync();
         _terminalConnected = false;
         _terminalStatus = "Disconnected.";
+        RefreshConversationTokenInputs();
     }
 
     private async Task SendTerminalInputAsync(string data)
@@ -481,6 +523,57 @@ else
         if (args.Key == "Enter")
             ApproveElevationPrompt();
     }
+
+    private void RefreshConversationTokenInputs()
+    {
+        _systemPrompt = AssistantPromptBuilder.Build(TerminalSession.GetSnapshot());
+        _toolDefinitions = BuildToolDefinitions();
+        UpdateConversationTokenCount();
+    }
+
+    private void UpdateConversationTokenCount()
+    {
+        _conversationTokens = ChatTranscriptTokenCounter.Count(
+            TokenCounter,
+            _persistedMessages,
+            ToTokenMessage,
+            _live,
+            new TokenCountRequest(_activeProvider?.ModelId),
+            _pendingUserText,
+            _systemPrompt,
+            _toolDefinitions);
+    }
+
+    private List<string> BuildToolDefinitions()
+    {
+        var tools = ShellTools.Build(new AssistantShellToolContext(TerminalSession, CancellationToken.None));
+        return tools.OfType<AIFunction>().Select(ToToolDefinition).ToList();
+    }
+
+    private static string ToToolDefinition(AIFunction function)
+    {
+        var sb = new StringBuilder();
+        sb.Append("Name: ").AppendLine(function.Name);
+        if (!string.IsNullOrWhiteSpace(function.Description))
+            sb.Append("Description: ").AppendLine(function.Description);
+
+        var schema = function.JsonSchema;
+        if (schema.ValueKind != JsonValueKind.Undefined)
+        {
+            sb.AppendLine("Parameters:");
+            sb.AppendLine(schema.GetRawText());
+        }
+
+        return sb.ToString();
+    }
+
+    private static ChatTranscriptTokenMessage ToTokenMessage(AssistantMessage message) => new(
+        message.Role.ToString(),
+        message.Content,
+        message.ToolCallsJson,
+        message.ToolCallId,
+        message.ToolName,
+        message.ErrorMessage);
 
     private static List<ChatRenderableMessage> ToRenderable(IReadOnlyList<AssistantMessage> messages)
     {
