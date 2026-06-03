@@ -10,6 +10,10 @@ main {
     min-width: 0;
 }
 
+article.content {
+    padding-top: 0;
+}
+
 .sidebar {
     background: #17212b;
 }
