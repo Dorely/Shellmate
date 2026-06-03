@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
+using Shellmate.Connections;
 using Shellmate.Llm;
 using Shellmate.Models;
 using Shellmate.Persistence.Repositories;
@@ -16,7 +17,8 @@ public sealed class AssistantChatService(
     ILlmProviderService providerService,
     IChatClientFactory chatClientFactory,
     ITerminalSessionService terminal,
-    AssistantShellTools shellTools,
+    IWorkspaceConnectionContext workspace,
+    AssistantToolRegistry toolRegistry,
     IOptions<AgentOptions> options,
     ILogger<AssistantChatService> logger) : IAssistantChatService
 {
@@ -94,7 +96,7 @@ public sealed class AssistantChatService(
         try
         {
             chat = await chatClientFactory.CreateChatClientAsync(providerAvailability.Provider.Id, cancellationToken);
-            aiTools = shellTools.Build(new AssistantShellToolContext(terminal, cancellationToken));
+            aiTools = toolRegistry.Build(new AssistantToolContext(terminal, workspace, cancellationToken));
             systemPrompt = AssistantPromptBuilder.Build(terminal.GetSnapshot());
         }
         catch (Exception ex)

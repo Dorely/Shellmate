@@ -14,6 +14,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, ILogger<AppDbC
     public DbSet<AssistantConversation> AssistantConversations => Set<AssistantConversation>();
     public DbSet<AssistantMessage> AssistantMessages => Set<AssistantMessage>();
     public DbSet<TerminalConnection> TerminalConnections => Set<TerminalConnection>();
+    public DbSet<ConnectionNote> ConnectionNotes => Set<ConnectionNote>();
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
         SaveChangesWithLockRetryAsync(acceptAllChangesOnSuccess: true, cancellationToken);
@@ -106,6 +107,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, ILogger<AppDbC
             entity.Property(e => e.Kind).HasConversion<string>();
             entity.Property(e => e.SshAuthType).HasConversion<string>();
             entity.Property(e => e.ShellKind).HasConversion<string>();
+
+            entity.HasMany(e => e.Notes)
+                .WithOne(e => e.TerminalConnection)
+                .HasForeignKey(e => e.TerminalConnectionId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ConnectionNote>(entity =>
+        {
+            entity.HasIndex(e => new { e.TerminalConnectionId, e.NormalizedTitle }).IsUnique();
         });
     }
 }

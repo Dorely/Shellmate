@@ -1,0 +1,428 @@
+@namespace Shellmate.Components.Notes
+@inject IConnectionNoteService Notes
+
+@if (Open)
+{
+    <div class="notes-layer">
+        <button type="button" class="notes-backdrop" aria-label="Close notes" @onclick="CloseAsync"></button>
+        <aside class="notes-drawer" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+            <header class="notes-header">
+                <div>
+                    <div id="notes-title" class="notes-title">Notes</div>
+                    <div class="notes-subtitle">@ConnectionLabel</div>
+                </div>
+                <button type="button" class="btn-close" aria-label="Close notes" @onclick="CloseAsync"></button>
+            </header>
+
+            @if (!string.IsNullOrWhiteSpace(_error))
+            {
+                <div class="notes-alert notes-alert-error">
+                    <span>@_error</span>
+                    <button type="button" class="btn-close btn-close-sm" @onclick="ClearMessages"></button>
+                </div>
+            }
+            else if (!string.IsNullOrWhiteSpace(_status))
+            {
+                <div class="notes-alert notes-alert-status">
+                    <span>@_status</span>
+                    <button type="button" class="btn-close btn-close-sm" @onclick="ClearMessages"></button>
+                </div>
+            }
+
+            @if (ConnectionId is null)
+            {
+                <div class="notes-empty">Select a connection to manage notes.</div>
+            }
+            else
+            {
+                <div class="notes-body">
+                    <section class="notes-list-panel" aria-label="Connection notes">
+                        <div class="notes-list-header">
+                            <span>@_notes.Count note@(_notes.Count == 1 ? string.Empty : "s")</span>
+                            <button type="button" class="btn btn-sm btn-primary" disabled="@(_creating || _saving)" @onclick="CreateAsync">
+                                @(_creating ? "Creating..." : "New")
+                            </button>
+                        </div>
+
+                        @if (_loading)
+                        {
+                            <div class="notes-empty"><em>Loading notes...</em></div>
+                        }
+                        else if (_notes.Count == 0)
+                        {
+                            <div class="notes-empty">No notes yet.</div>
+                        }
+                        else
+                        {
+                            <div class="notes-list">
+                                @foreach (var note in _notes)
+                                {
+                                    <button type="button"
+                                            class="notes-list-item @(_selectedNoteId == note.Id ? "selected" : string.Empty)"
+                                            @onclick="() => SelectNoteAsync(note.Id)">
+                                        <span class="notes-list-title">@note.Title</span>
+                                        <span class="notes-list-meta">@FormatUpdated(note.UpdatedAt) · @note.ContentLength chars</span>
+                                    </button>
+                                }
+                            </div>
+                        }
+                    </section>
+
+                    <section class="notes-editor-panel" aria-label="Selected note">
+                        @if (_selectedNote is null)
+                        {
+                            <div class="notes-empty">Create or select a note.</div>
+                        }
+                        else
+                        {
+                            <label class="form-label form-label-sm" for="note-title">Title</label>
+                            <input id="note-title"
+                                   class="form-control form-control-sm"
+                                   value="@_editingTitle"
+                                   @oninput="OnTitleInput" />
+
+                            <label class="form-label form-label-sm notes-content-label" for="note-content">Content</label>
+                            <textarea id="note-content"
+                                      class="form-control notes-content"
+                                      spellcheck="true"
+                                      value="@_editingContent"
+                                      @oninput="OnContentInput"></textarea>
+
+                            <div class="notes-editor-actions">
+                                <button type="button" class="btn btn-sm btn-primary" disabled="@(_saving || !IsDirty)" @onclick="SaveCurrentAsync">
+                                    @(_saving ? "Saving..." : "Save")
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-danger" disabled="@_saving" @onclick="StartDelete">
+                                    Delete
+                                </button>
+                                @if (IsDirty)
+                                {
+                                    <span class="notes-dirty">Unsaved changes</span>
+                                }
+                            </div>
+
+                            @if (_confirmDelete)
+                            {
+                                <div class="notes-delete-confirm">
+                                    <span>Delete this note?</span>
+                                    <button type="button" class="btn btn-sm btn-danger" disabled="@_saving" @onclick="DeleteSelectedAsync">Delete</button>
+                                    <button type="button" class="btn btn-sm btn-link" disabled="@_saving" @onclick="CancelDelete">Cancel</button>
+                                </div>
+                            }
+                        }
+                    </section>
+                </div>
+            }
+        </aside>
+    </div>
+}
+
+@code {
+    private readonly List<ConnectionNoteSummary> _notes = [];
+    private Guid? _loadedConnectionId;
+    private Guid? _selectedNoteId;
+    private ConnectionNoteDetail? _selectedNote;
+    private string _editingTitle = string.Empty;
+    private string _editingContent = string.Empty;
+    private string? _error;
+    private string? _status;
+    private bool _loading;
+    private bool _saving;
+    private bool _creating;
+    private bool _confirmDelete;
+    private bool _wasOpen;
+
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public EventCallback<bool> OpenChanged { get; set; }
+    [Parameter] public Guid? ConnectionId { get; set; }
+    [Parameter] public string? ConnectionName { get; set; }
+
+    private string ConnectionLabel => string.IsNullOrWhiteSpace(ConnectionName)
+        ? "No connection selected"
+        : ConnectionName;
+
+    private bool IsDirty => _selectedNote is not null
+        && (_editingTitle != _selectedNote.Title || _editingContent != _selectedNote.Content);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var opening = Open && !_wasOpen;
+        _wasOpen = Open;
+
+        if (_loadedConnectionId != ConnectionId)
+        {
+            if (IsDirty)
+                await SaveCurrentIfDirtyAsync(silent: true);
+
+            _loadedConnectionId = ConnectionId;
+            ClearSelectedNote();
+            await ReloadAsync(selectFirst: true, reloadSelected: true);
+            return;
+        }
+
+        if (opening && ConnectionId is not null)
+            await RefreshAsync();
+    }
+
+    public async Task RefreshAsync()
+    {
+        if (ConnectionId is null)
+        {
+            ClearNotes();
+            return;
+        }
+
+        var selectedId = _selectedNoteId;
+        var dirty = IsDirty;
+        await ReloadListAsync();
+
+        if (selectedId is not Guid noteId)
+        {
+            if (_notes.Count > 0)
+                await LoadNoteAsync(_notes[0].Id);
+            return;
+        }
+
+        if (_notes.All(note => note.Id != noteId))
+        {
+            ClearSelectedNote();
+            if (_notes.Count > 0)
+                await LoadNoteAsync(_notes[0].Id);
+            return;
+        }
+
+        if (!dirty)
+            await LoadNoteAsync(noteId);
+    }
+
+    private async Task CloseAsync()
+    {
+        ClearMessages();
+        await OpenChanged.InvokeAsync(false);
+    }
+
+    private async Task CreateAsync()
+    {
+        if (ConnectionId is not Guid connectionId || _creating)
+            return;
+
+        if (!await SaveCurrentIfDirtyAsync(silent: true))
+            return;
+
+        _creating = true;
+        ClearMessages();
+        try
+        {
+            var note = await Notes.CreateDefaultAsync(connectionId);
+            await ReloadListAsync();
+            await LoadNoteAsync(note.Id);
+            _status = "Note created.";
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private async Task SelectNoteAsync(Guid noteId)
+    {
+        if (_selectedNoteId == noteId)
+            return;
+
+        if (!await SaveCurrentIfDirtyAsync(silent: true))
+            return;
+
+        await LoadNoteAsync(noteId);
+    }
+
+    private async Task SaveCurrentAsync()
+    {
+        await SaveCurrentIfDirtyAsync(silent: false);
+    }
+
+    private async Task<bool> SaveCurrentIfDirtyAsync(bool silent)
+    {
+        if (!IsDirty || ConnectionId is not Guid connectionId || _selectedNote is null || _saving)
+            return true;
+
+        _saving = true;
+        if (!silent)
+            ClearMessages();
+
+        try
+        {
+            var saved = _selectedNote;
+            if (_editingTitle != saved.Title)
+                saved = await Notes.RenameAsync(connectionId, saved.Id, _editingTitle);
+            if (_editingContent != saved.Content)
+                saved = await Notes.UpdateContentAsync(connectionId, saved.Id, _editingContent);
+
+            _selectedNote = saved;
+            _selectedNoteId = saved.Id;
+            _editingTitle = saved.Title;
+            _editingContent = saved.Content;
+            await ReloadListAsync();
+            if (!silent)
+                _status = "Note saved.";
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            return false;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void StartDelete()
+    {
+        _confirmDelete = true;
+        ClearMessages();
+    }
+
+    private void CancelDelete()
+    {
+        _confirmDelete = false;
+    }
+
+    private async Task DeleteSelectedAsync()
+    {
+        if (ConnectionId is not Guid connectionId || _selectedNote is null || _saving)
+            return;
+
+        _saving = true;
+        ClearMessages();
+        try
+        {
+            await Notes.DeleteAsync(connectionId, _selectedNote.Id);
+            ClearSelectedNote();
+            await ReloadListAsync();
+            if (_notes.Count > 0)
+                await LoadNoteAsync(_notes[0].Id);
+            _status = "Note deleted.";
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ReloadAsync(bool selectFirst, bool reloadSelected)
+    {
+        ClearMessages();
+        if (ConnectionId is null)
+        {
+            ClearNotes();
+            return;
+        }
+
+        await ReloadListAsync();
+        if (_selectedNoteId is Guid selectedId && reloadSelected && _notes.Any(note => note.Id == selectedId))
+        {
+            await LoadNoteAsync(selectedId);
+        }
+        else if (selectFirst && _notes.Count > 0)
+        {
+            await LoadNoteAsync(_notes[0].Id);
+        }
+    }
+
+    private async Task ReloadListAsync()
+    {
+        if (ConnectionId is not Guid connectionId)
+        {
+            ClearNotes();
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            _notes.Clear();
+            _notes.AddRange(await Notes.ListAsync(connectionId));
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task LoadNoteAsync(Guid noteId)
+    {
+        if (ConnectionId is not Guid connectionId)
+            return;
+
+        ClearMessages();
+        _confirmDelete = false;
+        var note = await Notes.GetAsync(connectionId, noteId);
+        if (note is null)
+        {
+            ClearSelectedNote();
+            _error = "Note was not found.";
+            return;
+        }
+
+        _selectedNote = note;
+        _selectedNoteId = note.Id;
+        _editingTitle = note.Title;
+        _editingContent = note.Content;
+    }
+
+    private void OnTitleInput(ChangeEventArgs args)
+    {
+        _editingTitle = args.Value?.ToString() ?? string.Empty;
+        _confirmDelete = false;
+    }
+
+    private void OnContentInput(ChangeEventArgs args)
+    {
+        _editingContent = args.Value?.ToString() ?? string.Empty;
+        _confirmDelete = false;
+    }
+
+    private void ClearNotes()
+    {
+        _notes.Clear();
+        ClearSelectedNote();
+        _loading = false;
+    }
+
+    private void ClearSelectedNote()
+    {
+        _selectedNote = null;
+        _selectedNoteId = null;
+        _editingTitle = string.Empty;
+        _editingContent = string.Empty;
+        _confirmDelete = false;
+    }
+
+    private void ClearMessages()
+    {
+        _error = null;
+        _status = null;
+    }
+
+    private static string FormatUpdated(DateTime updatedAt)
+    {
+        var local = updatedAt.ToLocalTime();
+        return local.Date == DateTime.Now.Date
+            ? local.ToString("h:mm tt")
+            : local.ToString("MMM d");
+    }
+}

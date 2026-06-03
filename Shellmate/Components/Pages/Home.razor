@@ -13,7 +13,8 @@
 @inject ILlmProviderService ProviderService
 @inject ITerminalConnectionService ConnectionService
 @inject ITerminalSessionService TerminalSession
-@inject AssistantShellTools ShellTools
+@inject IWorkspaceConnectionContext WorkspaceConnection
+@inject AssistantToolRegistry ToolRegistry
 @inject ITokenCounter TokenCounter
 @inject NavigationManager Nav
 
@@ -63,12 +64,18 @@ else
                 <div class="terminal-actions">
                     <select class="form-select form-select-sm terminal-select"
                             disabled="@(_connections.Count == 0 || _connecting || _terminalConnected)"
-                            @bind="_selectedConnectionId">
+                            value="@SelectedConnectionValue"
+                            @onchange="OnSelectedConnectionChangedAsync">
                         @foreach (var connection in _connections)
                         {
                             <option value="@connection.Id">@connection.Name</option>
                         }
                     </select>
+                    <button type="button" class="btn btn-sm btn-outline-secondary"
+                            disabled="@(_selectedConnectionId is null)"
+                            @onclick="OpenNotes">
+                        Notes
+                    </button>
                     @if (_terminalConnected)
                     {
                         <button type="button" class="btn btn-sm btn-outline-danger" @onclick="DisconnectTerminalAsync">Disconnect</button>
@@ -115,6 +122,12 @@ else
         </section>
     </div>
 
+    <ConnectionNotesDrawer @ref="_notesDrawer"
+                           Open="@_notesOpen"
+                           OpenChanged="OnNotesOpenChangedAsync"
+                           ConnectionId="@_selectedConnectionId"
+                           ConnectionName="@SelectedConnectionName" />
+
     @if (_elevationPrompt is not null)
     {
         <div class="elevation-backdrop" role="presentation">
@@ -152,6 +165,7 @@ else
     private CancellationTokenSource? _turnCts;
     private CancellationTokenSource? _outputCts;
     private TerminalSurface? _terminal;
+    private ConnectionNotesDrawer? _notesDrawer;
     private LlmProvider? _activeProvider;
     private TerminalSize _terminalSize = TerminalSize.Default;
     private TerminalHostKeyPrompt? _hostKeyPrompt;
@@ -175,6 +189,7 @@ else
     private bool _terminalReady;
     private bool _redirecting;
     private bool _hasWorkingProvider;
+    private bool _notesOpen;
     private ChatTranscriptTokenCount _conversationTokens = ChatTranscriptTokenCount.Empty;
     private int _forceScrollKey;
     private int _scrollKey;
@@ -187,6 +202,12 @@ else
     private string? ConversationTokenTitle => _hasWorkingProvider
         ? _conversationTokens.Title(ConversationTokenTitleLabel)
         : null;
+
+    private string SelectedConnectionValue => _selectedConnectionId?.ToString() ?? string.Empty;
+
+    private string? SelectedConnectionName => _connections
+        .FirstOrDefault(connection => connection.Id == _selectedConnectionId)
+        ?.Name;
 
     protected override async Task OnInitializedAsync()
     {
@@ -224,12 +245,14 @@ else
         _connections.AddRange(await ConnectionService.ListAsync());
         if (_connections.Count == 0)
         {
+            SetSelectedConnection(null);
             _redirecting = true;
             Nav.NavigateTo("settings/connections?returnUrl=/", replace: true);
             return;
         }
 
         _selectedConnectionId ??= _connections[0].Id;
+        SetSelectedConnection(_selectedConnectionId);
 
         var availability = await ProviderService.GetDefaultChatProviderAvailabilityAsync();
         _hasWorkingProvider = availability.IsAvailable && availability.Provider is not null;
@@ -343,6 +366,8 @@ else
                         break;
                     case AssistantToolCallCompleted completed:
                         _live.CompleteToolCall(completed.CallId, completed.Result, completed.Error, completed.DurationMs);
+                        if (IsNoteTool(completed.ToolName))
+                            await RefreshNotesAfterToolAsync();
                         UpdateConversationTokenCount();
                         _scrollKey++;
                         break;
@@ -388,6 +413,46 @@ else
     private void ClearError()
     {
         _error = null;
+    }
+
+    private async Task OnSelectedConnectionChangedAsync(ChangeEventArgs args)
+    {
+        var value = args.Value?.ToString();
+        if (!Guid.TryParse(value, out var connectionId))
+            connectionId = Guid.Empty;
+
+        SetSelectedConnection(connectionId == Guid.Empty ? null : connectionId);
+        _hostKeyPrompt = null;
+        _terminalError = null;
+        RefreshConversationTokenInputs();
+
+        if (_notesDrawer is not null)
+            await _notesDrawer.RefreshAsync();
+    }
+
+    private void SetSelectedConnection(Guid? connectionId)
+    {
+        _selectedConnectionId = connectionId;
+        WorkspaceConnection.SetSelectedConnection(connectionId);
+    }
+
+    private void OpenNotes()
+    {
+        _notesOpen = true;
+    }
+
+    private Task OnNotesOpenChangedAsync(bool open)
+    {
+        _notesOpen = open;
+        return Task.CompletedTask;
+    }
+
+    private async Task RefreshNotesAfterToolAsync()
+    {
+        if (_notesDrawer is null)
+            return;
+
+        await _notesDrawer.RefreshAsync();
     }
 
     private async Task ConnectTerminalAsync(bool trustPresentedHostKey)
@@ -546,7 +611,7 @@ else
 
     private List<string> BuildToolDefinitions()
     {
-        var tools = ShellTools.Build(new AssistantShellToolContext(TerminalSession, CancellationToken.None));
+        var tools = ToolRegistry.Build(new AssistantToolContext(TerminalSession, WorkspaceConnection, CancellationToken.None));
         return tools.OfType<AIFunction>().Select(ToToolDefinition).ToList();
     }
 
@@ -661,6 +726,14 @@ else
 
         return chip;
     }
+
+    private static bool IsNoteTool(string toolName) => toolName is
+        "list_connection_notes" or
+        "read_connection_note" or
+        "create_connection_note" or
+        "rename_connection_note" or
+        "update_connection_note" or
+        "delete_connection_note";
 
     public async ValueTask DisposeAsync()
     {

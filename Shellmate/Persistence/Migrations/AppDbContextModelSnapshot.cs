@@ -81,6 +81,41 @@ namespace Shellmate.Persistence.Migrations
                     b.ToTable("AssistantMessages");
                 });
 
+            modelBuilder.Entity("Shellmate.Models.ConnectionNote", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NormalizedTitle")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TerminalConnectionId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TerminalConnectionId", "NormalizedTitle")
+                        .IsUnique();
+
+                    b.ToTable("ConnectionNotes");
+                });
+
             modelBuilder.Entity("Shellmate.Models.LlmProvider", b =>
                 {
                     b.Property<int>("Id")
@@ -286,6 +321,17 @@ namespace Shellmate.Persistence.Migrations
                     b.Navigation("Conversation");
                 });
 
+            modelBuilder.Entity("Shellmate.Models.ConnectionNote", b =>
+                {
+                    b.HasOne("Shellmate.Models.TerminalConnection", "TerminalConnection")
+                        .WithMany("Notes")
+                        .HasForeignKey("TerminalConnectionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("TerminalConnection");
+                });
+
             modelBuilder.Entity("Shellmate.Models.LlmProvider", b =>
                 {
                     b.HasOne("Shellmate.Models.LlmProvider", "CredentialSource")
@@ -317,6 +363,11 @@ namespace Shellmate.Persistence.Migrations
                     b.Navigation("ChildModels");
 
                     b.Navigation("OAuthTokens");
+                });
+
+            modelBuilder.Entity("Shellmate.Models.TerminalConnection", b =>
+                {
+                    b.Navigation("Notes");
                 });
 #pragma warning restore 612, 618
         }

@@ -25,7 +25,7 @@
 | File | Description |
 |------|-------------|
 | `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, tokenizers, SSH.NET, Quick.PtyNet, runtime IDs, and warnings-as-errors. |
-| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, token counting, shell tools, and routing. |
+| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, token counting, assistant tools, notes, and routing. |
 | `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, agent/tool/terminal limits, and token-counting defaults. |
 | `Properties/launchSettings.json` | Local launch profiles for browser-hosted HTTP and Electron desktop mode on `localhost:1455`. |
 | `Properties/electron-builder.json` | Electron/electron-builder packaging metadata for Windows, Linux, and macOS targets. |
@@ -40,9 +40,11 @@
 
 | File | Description |
 |------|-------------|
-| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent global assistant chat service with provider resolution, manual tool-call loop, shell tool invocation, cancellation, reset, and transcript persistence. |
-| `AssistantPromptBuilder.cs` | Builds the app-owned assistant system prompt with tool-use rules and dynamic terminal context. |
+| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent global assistant chat service with provider resolution, manual tool-call loop, shared assistant tool invocation, cancellation, reset, and transcript persistence. |
+| `AssistantPromptBuilder.cs` | Builds the app-owned assistant system prompt with tool-use rules, visible note guidance, and dynamic terminal context. |
+| `AssistantToolRegistry.cs` | Shared assistant tool registry that combines shell and note tools for model requests and token-count previews. |
 | `AssistantShellTools.cs` | Defines shell inspection and command-execution tools over the currently connected terminal session. |
+| `AssistantNoteTools.cs` | Defines connection-scoped note list/read/create/rename/update/delete tools resolved through the selected workspace connection. |
 | `AssistantTurnUpdate.cs` | Streaming update records consumed by the chat page: text deltas, tool-call events, completion, and turn errors. |
 
 ### Components/
@@ -67,6 +69,12 @@
 | File | Description |
 |------|-------------|
 | `TerminalSurface.razor` / `.razor.css` / `.razor.js` | Reusable xterm surface with JS interop for initialization, input, output, fit/resize, focus, and disposal. |
+
+### Components/Notes/
+
+| File | Description |
+|------|-------------|
+| `ConnectionNotesDrawer.razor` / `.razor.css` | Right-side workspace drawer for selected-connection note listing, creation, editing, saving, and deletion. |
 
 ### Components/Layout/
 
@@ -93,6 +101,14 @@
 | `ConnectionSecretNames.cs` | Centralized secret key names for SSH passwords and private-key passphrases. |
 | `ITerminalConnectionService.cs` / `TerminalConnectionService.cs` | Connection profile CRUD, validation, credential secret handling, and SSH host-key trust updates. |
 | `TerminalConnectionModels.cs` | Service DTOs for connection drafts, shell-kind hints, secret status, and trusted SSH host-key metadata. |
+| `IWorkspaceConnectionContext.cs` / `WorkspaceConnectionContext.cs` | Scoped workspace-selected connection context shared by the UI and assistant note tools. |
+
+### Notes/
+
+| File | Description |
+|------|-------------|
+| `IConnectionNoteService.cs` / `ConnectionNoteService.cs` | Connection-scoped note CRUD service with title validation, unique default titles, and title-based agent operations. |
+| `ConnectionNoteModels.cs` | Service DTOs for note summaries and full note details. |
 
 ### Llm/
 
@@ -116,6 +132,7 @@
 | `AssistantConversation.cs` | EF entity for the single persistent assistant conversation. |
 | `AssistantMessage.cs` | EF entity and enums for transcript messages, tool-call manifests/results, roles, statuses, and errors. |
 | `AuthType.cs` | Enum for provider authentication modes: none, API key, or OAuth. |
+| `ConnectionNote.cs` | EF entity for persistent Markdown-style notes scoped to terminal connections. |
 | `LlmProvider.cs` | EF entity for chat endpoint/model rows, default selection, child model credential inheritance, and readiness snapshots. |
 | `OAuthToken.cs` | EF entity for OAuth token metadata; token values are stored through `ISecretStore`. |
 | `StoredSecret.cs` | EF entity backing the first SQLite implementation of `ISecretStore`. |
@@ -137,6 +154,7 @@
 | `20260602000000_InitialSchema.cs` | EF baseline migration for the schema that existed before migration adoption. |
 | `20260602001000_AddTerminalConnections.cs` | EF migration adding terminal connection profile storage. |
 | `20260603000000_AddAssistantToolCallsAndShellKind.cs` | EF migration adding assistant tool transcript columns and terminal shell-kind hints. |
+| `20260603001000_AddConnectionNotes.cs` | EF migration adding connection-scoped note storage with cascade deletion and per-connection unique titles. |
 | `AppDbContextModelSnapshot.cs` | EF model snapshot for the current migrated schema. |
 
 ### Persistence/Repositories/
@@ -147,6 +165,7 @@
 | `IOAuthTokenRepository.cs` / `OAuthTokenRepository.cs` | EF repository for OAuth token metadata replacement, lookup, and deletion. |
 | `IAssistantConversationRepository.cs` / `AssistantConversationRepository.cs` | EF repository for the global assistant conversation and ordered transcript messages. |
 | `ITerminalConnectionRepository.cs` / `TerminalConnectionRepository.cs` | EF repository for terminal connection CRUD, ordered listing, and default profile lookup. |
+| `IConnectionNoteRepository.cs` / `ConnectionNoteRepository.cs` | EF repository for connection-scoped note listing, lookup, mutation, and persistence. |
 
 ### Terminal/
 

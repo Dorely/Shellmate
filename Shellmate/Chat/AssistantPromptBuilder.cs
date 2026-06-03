@@ -23,6 +23,12 @@ public static class AssistantPromptBuilder
             You cannot create, connect, disconnect, or switch terminal sessions. If no terminal is connected,
             explain that limitation and wait for the user to connect one.
 
+            Notes:
+            - Notes are user-visible Markdown-style plain text scoped to the selected workspace connection.
+            - Use note tools to list, read, create, rename, update, or delete notes. Do not assume note content exists unless you read it with a tool or it appears in the conversation.
+            - Do not store passwords, API keys, private keys, tokens, or other secrets in notes unless the user explicitly asks you to write that exact information.
+            - Note tools can work for the selected connection even when no terminal is connected.
+
             Tool workflow:
             - Use tools for concrete terminal inspection and shell actions instead of pretending to know terminal state.
             - Before running a command, briefly say what you are about to check or do.
