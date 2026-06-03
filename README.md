@@ -11,10 +11,12 @@ Implemented now:
 - Provider configuration for OpenAI account OAuth and arbitrary OpenAI-compatible chat endpoints.
 - SQLite-backed `ISecretStore` abstraction for API keys and OAuth tokens.
 - Persistent global chat transcript with streaming responses, stop/cancel, reset, and default-provider gating.
+- Saved SSH and local shell terminal connection profiles with credentials stored through `ISecretStore`.
+- Workspace layout with chat in the left pane and an xterm-based terminal in the right pane.
+- Local PTY-backed shell sessions and SSH shell sessions with explicit SSH host-key trust.
 
 Not implemented yet:
 
-- SSH connection management.
 - Remote desktop sessions.
 - Per-connection notes.
 - Agent tools that inspect or modify remote machines.
@@ -72,4 +74,4 @@ Cross-platform package creation may require building on the target OS depending 
 
 ## Local Data
 
-The local SQLite database stores provider metadata, chat transcripts, and first-slice secret values through `ISecretStore`. Database files are ignored by git.
+The local SQLite database stores provider metadata, terminal connection metadata, chat transcripts, and first-slice secret values through `ISecretStore`. SSH passwords and private-key passphrases are stored as secrets; private-key paths are stored as connection metadata. Database files are ignored by git.

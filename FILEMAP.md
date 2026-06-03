@@ -24,8 +24,8 @@
 
 | File | Description |
 |------|-------------|
-| `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, runtime IDs, and warnings-as-errors. |
-| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, SQLite `EnsureCreated`, OAuth endpoints, and routing. |
+| `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, SSH.NET, Quick.PtyNet, runtime IDs, and warnings-as-errors. |
+| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, and routing. |
 | `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, and agent timeouts. |
 | `Properties/launchSettings.json` | Local launch profiles for browser-hosted HTTP and Electron desktop mode on `localhost:1455`. |
 | `Properties/electron-builder.json` | Electron/electron-builder packaging metadata for Windows, Linux, and macOS targets. |
@@ -47,7 +47,7 @@
 
 | File | Description |
 |------|-------------|
-| `App.razor` | Root HTML shell, static assets, Blazor script, and reconnect modal. |
+| `App.razor` | Root HTML shell, static assets including xterm, Blazor script, and reconnect modal. |
 | `Routes.razor` | Router setup using `MainLayout` and the NotFound page. |
 | `_Imports.razor` | Shared Razor `@using` directives for components. |
 
@@ -58,22 +58,37 @@
 | `ChatModels.cs` | UI-only chat transcript/live-turn models used by `ChatSurface`. |
 | `ChatSurface.razor` / `.razor.css` / `.razor.js` | Reusable chat shell for transcript rendering, streaming state, composer autosize, enter-to-send, and scroll-follow behavior. |
 
+### Components/Terminal/
+
+| File | Description |
+|------|-------------|
+| `TerminalSurface.razor` / `.razor.css` / `.razor.js` | Reusable xterm surface with JS interop for initialization, input, output, fit/resize, focus, and disposal. |
+
 ### Components/Layout/
 
 | File | Description |
 |------|-------------|
 | `MainLayout.razor` / `.razor.css` | Desktop-style app shell with left navigation and full-height content area. |
-| `NavMenu.razor` / `.razor.css` | Sidebar navigation for Chat and Providers. |
+| `NavMenu.razor` / `.razor.css` | Sidebar navigation for Chat, Providers, and Connections. |
 | `ReconnectModal.razor` / `.razor.css` / `.razor.js` | Template reconnect UI shown when the SignalR circuit drops. |
 
 ### Components/Pages/
 
 | File | Description |
 |------|-------------|
-| `Home.razor` / `.razor.css` | Chat route at `/` and `/chat`; loads/persists transcript, streams turns, supports reset and stop, and gates composer on a tested provider. |
+| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat in the left pane and a selectable terminal session in the right pane. |
 | `NotFound.razor` | 404 page wired through status-code re-execution. |
 | `Error.razor` | Error page rendered by exception handler middleware. |
 | `Settings/Providers.razor` / `.razor.css` | Provider settings page for OpenAI account OAuth, OpenAI-compatible endpoints, model tests, defaults, API-key updates, and child model rows. |
+| `Settings/Connections.razor` / `.razor.css` | Connection settings page for creating, editing, and deleting SSH and local shell terminal profiles. |
+
+### Connections/
+
+| File | Description |
+|------|-------------|
+| `ConnectionSecretNames.cs` | Centralized secret key names for SSH passwords and private-key passphrases. |
+| `ITerminalConnectionService.cs` / `TerminalConnectionService.cs` | Connection profile CRUD, validation, credential secret handling, and SSH host-key trust updates. |
+| `TerminalConnectionModels.cs` | Service DTOs for connection drafts, secret status, and trusted SSH host-key metadata. |
 
 ### Llm/
 
@@ -97,14 +112,24 @@
 | `LlmProvider.cs` | EF entity for chat endpoint/model rows, default selection, child model credential inheritance, and readiness snapshots. |
 | `OAuthToken.cs` | EF entity for OAuth token metadata; token values are stored through `ISecretStore`. |
 | `StoredSecret.cs` | EF entity backing the first SQLite implementation of `ISecretStore`. |
+| `TerminalConnection.cs` | EF entity and enums for SSH and local shell terminal connection profiles. |
 
 ### Persistence/
 
 | File | Description |
 |------|-------------|
-| `AppDbContext.cs` | EF Core context for providers, OAuth metadata, stored secrets, and assistant transcripts; includes SQLite lock retry and model configuration. |
+| `AppDbContext.cs` | EF Core context for providers, OAuth metadata, terminal connections, stored secrets, and assistant transcripts; includes SQLite lock retry and model configuration. |
+| `DatabaseMigrationBootstrapper.cs` | Migration bootstrapper that stamps existing `EnsureCreated` databases with the baseline migration before running EF migrations. |
 | `PersistenceServiceCollectionExtensions.cs` | DI extension that wires `AppDbContext` to SQLite from configuration. |
 | `SqliteConnectionSettings.cs` | SQLite connection-string builder and PRAGMA setup for busy timeout and WAL mode. |
+
+### Persistence/Migrations/
+
+| File | Description |
+|------|-------------|
+| `20260602000000_InitialSchema.cs` | EF baseline migration for the schema that existed before migration adoption. |
+| `20260602001000_AddTerminalConnections.cs` | EF migration adding terminal connection profile storage. |
+| `AppDbContextModelSnapshot.cs` | EF model snapshot for the current migrated schema. |
 
 ### Persistence/Repositories/
 
@@ -113,6 +138,17 @@
 | `ILlmProviderRepository.cs` / `LlmProviderRepository.cs` | EF repository for provider CRUD, lookup, and default selection. |
 | `IOAuthTokenRepository.cs` / `OAuthTokenRepository.cs` | EF repository for OAuth token metadata replacement, lookup, and deletion. |
 | `IAssistantConversationRepository.cs` / `AssistantConversationRepository.cs` | EF repository for the global assistant conversation and ordered transcript messages. |
+| `ITerminalConnectionRepository.cs` / `TerminalConnectionRepository.cs` | EF repository for terminal connection CRUD, ordered listing, and default profile lookup. |
+
+### Terminal/
+
+| File | Description |
+|------|-------------|
+| `ITerminalBackendSession.cs` | Common backend interface for local PTY and SSH terminal sessions. |
+| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | Per-circuit terminal coordinator for connect, input, output, resize, disconnect, and session cleanup. |
+| `LocalTerminalSession.cs` | Quick.PtyNet-backed local shell session with platform shell defaults and PTY cleanup. |
+| `SshTerminalSession.cs` | SSH.NET-backed shell session with password/private-key auth, `xterm-256color`, resize, and host-key trust checks. |
+| `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, connect results, and resolved SSH credentials. |
 
 ### Secrets/
 
@@ -128,3 +164,4 @@
 | `app.css` | App-wide CSS from the Blazor template. |
 | `favicon.png` | Site/app icon from the Blazor template. |
 | `lib/bootstrap/` | Vendored Bootstrap distribution used by first-slice UI. |
+| `lib/xterm/` | Vendored xterm.js, fit addon, styles, sourcemaps, and license files for the terminal surface. |

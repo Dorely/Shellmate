@@ -1,0 +1,20 @@
+.terminal-surface {
+    height: 100%;
+    min-height: 0;
+    background: #0b1117;
+    overflow: hidden;
+}
+
+.terminal-root {
+    height: 100%;
+    min-height: 0;
+}
+
+.terminal-root ::deep .xterm {
+    height: 100%;
+    padding: 0.65rem;
+}
+
+.terminal-root ::deep .xterm-viewport {
+    scrollbar-color: #4b5563 #111827;
+}

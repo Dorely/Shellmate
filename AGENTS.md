@@ -22,24 +22,12 @@
 ## Architectural Overview
 - Shellmate is desktop-first: normal user operation is through Electron, while browser-hosted development remains available for fast Codex and Playwright verification.
 - The app runs a local-only ASP.NET Core host and stores local state in SQLite.
-- AI provider metadata is stored separately from secrets. API keys and OAuth tokens flow through `ISecretStore`; the first implementation stores them in SQLite behind that abstraction.
-- The current chat is a global persistent transcript with no remote-machine tools. Future SSH/remote-desktop features should add explicit connection-scoped services and permission boundaries rather than expanding hidden agent access.
-
-## Project Structure
-- `Shellmate/` contains the Blazor/Electron app.
-- `Shellmate/Components/` contains Razor layout, pages, and reusable UI.
-- `Shellmate/Chat/` contains the first persistent assistant chat service.
-- `Shellmate/Llm/` contains provider configuration, OpenAI-compatible chat client creation, and OpenAI account OAuth support.
-- `Shellmate/Persistence/` contains EF Core context, SQLite setup, and repositories.
-- `Shellmate/Secrets/` contains the secret-store abstraction and SQLite-backed implementation.
-- `Shellmate/Models/` contains EF entities and small domain enums.
 
 ## Code Style
 - Use dependency injection for services and repositories.
 - Configuration belongs in `appsettings.json` and environment variables.
 - Keep UI components focused on interaction state; put persistence, provider resolution, and chat behavior in services.
 - Do not store new secrets directly on feature entities. Add them through `ISecretStore`.
-- Keep first-slice chat honest about implemented capability. Do not imply SSH, remote desktop, connection notes, or remote tools exist until they are implemented.
 
 ## Build & Run
 ```bash

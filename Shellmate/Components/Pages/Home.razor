@@ -4,48 +4,131 @@
 @using Shellmate.Llm
 @using Shellmate.Models
 @rendermode InteractiveServer
+@implements IAsyncDisposable
 @inject IAssistantChatService ChatService
 @inject ILlmProviderService ProviderService
+@inject ITerminalConnectionService ConnectionService
+@inject ITerminalSessionService TerminalSession
+@inject NavigationManager Nav
 
-<PageTitle>Shellmate Chat</PageTitle>
+<PageTitle>Shellmate</PageTitle>
 
-<div class="workspace">
-    <section class="workspace-main">
-        <ChatSurface Title="Shellmate"
-                     Subtitle="@_providerSubtitle"
-                     Loading="@_loading"
-                     Messages="@_messages"
-                     Live="@_live"
-                     Error="@_error"
-                     Input="@_input"
-                     InputChanged="OnInputChanged"
-                     Placeholder="Ask Shellmate..."
-                     Running="@_running"
-                     ComposerDisabled="@(_loading || !_hasWorkingProvider)"
-                     SendDisabled="@(_loading || _running || !_hasWorkingProvider || string.IsNullOrWhiteSpace(_input))"
-                     ForceScrollKey="@_forceScrollKey"
-                     ScrollKey="@_scrollKey"
-                     ResetComposerKey="@_resetComposerKey"
-                     OnSend="SendAsync"
-                     OnStop="StopAsync"
-                     OnClearError="ClearError">
-            <HeaderActions>
-                <a class="btn btn-sm btn-outline-secondary" href="settings/providers">Providers</a>
-                <button type="button" class="btn btn-sm btn-outline-danger" disabled="@_running" @onclick="ResetAsync">Reset</button>
-            </HeaderActions>
-        </ChatSurface>
-    </section>
-</div>
+@if (_redirecting)
+{
+    <div class="workspace-loading"><em>Opening connection settings...</em></div>
+}
+else
+{
+    <div class="workspace">
+        <section class="workspace-chat">
+            <ChatSurface Title="Shellmate"
+                         Subtitle="@_providerSubtitle"
+                         Loading="@_loading"
+                         Messages="@_messages"
+                         Live="@_live"
+                         Error="@_error"
+                         Input="@_input"
+                         InputChanged="OnInputChanged"
+                         Placeholder="Ask Shellmate..."
+                         Running="@_running"
+                         ComposerDisabled="@(_loading || !_hasWorkingProvider)"
+                         SendDisabled="@(_loading || _running || !_hasWorkingProvider || string.IsNullOrWhiteSpace(_input))"
+                         ForceScrollKey="@_forceScrollKey"
+                         ScrollKey="@_scrollKey"
+                         ResetComposerKey="@_resetComposerKey"
+                         OnSend="SendAsync"
+                         OnStop="StopAsync"
+                         OnClearError="ClearError">
+                <HeaderActions>
+                    <a class="btn btn-sm btn-outline-secondary" href="settings/providers">Providers</a>
+                    <button type="button" class="btn btn-sm btn-outline-danger" disabled="@_running" @onclick="ResetAsync">Reset</button>
+                </HeaderActions>
+            </ChatSurface>
+        </section>
+
+        <section class="workspace-terminal" aria-label="Terminal workspace">
+            <div class="terminal-header">
+                <div class="terminal-heading">
+                    <span class="terminal-title">Terminal</span>
+                    <span class="terminal-subtitle">@_terminalStatus</span>
+                </div>
+                <div class="terminal-actions">
+                    <select class="form-select form-select-sm terminal-select"
+                            disabled="@(_connections.Count == 0 || _connecting || _terminalConnected)"
+                            @bind="_selectedConnectionId">
+                        @foreach (var connection in _connections)
+                        {
+                            <option value="@connection.Id">@connection.Name</option>
+                        }
+                    </select>
+                    @if (_terminalConnected)
+                    {
+                        <button type="button" class="btn btn-sm btn-outline-danger" @onclick="DisconnectTerminalAsync">Disconnect</button>
+                    }
+                    else
+                    {
+                        <button type="button" class="btn btn-sm btn-primary"
+                                disabled="@(_connecting || !_terminalReady || _selectedConnectionId is null)"
+                                @onclick="() => ConnectTerminalAsync(false)">
+                            @(_connecting ? "Connecting..." : "Connect")
+                        </button>
+                    }
+                    <a class="btn btn-sm btn-outline-secondary" href="settings/connections">Connections</a>
+                </div>
+            </div>
+
+            @if (_hostKeyPrompt is not null)
+            {
+                <div class="terminal-host-key-alert">
+                    <div>
+                        <strong>Trust SSH host key?</strong>
+                        <span>@_hostKeyPrompt.Host:@_hostKeyPrompt.Port reports @_hostKeyPrompt.HostKeyName @(_hostKeyPrompt.KeyBits)-bit key.</span>
+                        <code>SHA256:@_hostKeyPrompt.FingerprintSha256</code>
+                    </div>
+                    <div class="terminal-host-key-actions">
+                        <button type="button" class="btn btn-sm btn-warning" disabled="@_connecting" @onclick="() => ConnectTerminalAsync(true)">Trust and reconnect</button>
+                        <button type="button" class="btn btn-sm btn-link" @onclick="DismissHostKeyPrompt">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            @if (!string.IsNullOrWhiteSpace(_terminalError))
+            {
+                <div class="terminal-error">
+                    <span>@_terminalError</span>
+                    <button type="button" class="btn-close btn-close-sm" @onclick="ClearTerminalError"></button>
+                </div>
+            }
+
+            <TerminalSurface @ref="_terminal"
+                             CssClass="workspace-terminal-surface"
+                             OnInput="SendTerminalInputAsync"
+                             OnResize="ResizeTerminalAsync" />
+        </section>
+    </div>
+}
 
 @code {
     private readonly List<ChatRenderableMessage> _messages = [];
+    private readonly List<TerminalConnection> _connections = [];
     private ChatLiveTurn? _live;
     private CancellationTokenSource? _turnCts;
+    private CancellationTokenSource? _outputCts;
+    private TerminalSurface? _terminal;
+    private TerminalSize _terminalSize = TerminalSize.Default;
+    private TerminalHostKeyPrompt? _hostKeyPrompt;
+    private Guid? _selectedConnectionId;
     private string _input = string.Empty;
     private string? _error;
+    private string? _terminalError;
     private string _providerSubtitle = "Checking provider status...";
+    private string _terminalStatus = "Select a connection to open a terminal.";
     private bool _loading = true;
     private bool _running;
+    private bool _connecting;
+    private bool _terminalConnected;
+    private bool _terminalReady;
+    private bool _redirecting;
     private bool _hasWorkingProvider;
     private int _forceScrollKey;
     private int _scrollKey;
@@ -54,16 +137,27 @@
     protected override async Task OnInitializedAsync()
     {
         await ReloadAsync();
+        StartTerminalOutputPump();
     }
 
     private async Task ReloadAsync()
     {
         _loading = true;
         _messages.Clear();
+        _connections.Clear();
 
         var conversation = await ChatService.GetOrCreateAsync();
         var messages = await ChatService.LoadMessagesAsync(conversation.Id);
         _messages.AddRange(messages.Select(ToRenderable));
+        _connections.AddRange(await ConnectionService.ListAsync());
+        if (_connections.Count == 0)
+        {
+            _redirecting = true;
+            Nav.NavigateTo("settings/connections?returnUrl=/", replace: true);
+            return;
+        }
+
+        _selectedConnectionId ??= _connections[0].Id;
 
         var availability = await ProviderService.GetDefaultChatProviderAvailabilityAsync();
         _hasWorkingProvider = availability.IsAvailable && availability.Provider is not null;
@@ -73,6 +167,54 @@
 
         _loading = false;
         _forceScrollKey++;
+    }
+
+    private void StartTerminalOutputPump()
+    {
+        _outputCts?.Cancel();
+        _outputCts?.Dispose();
+        _outputCts = new CancellationTokenSource();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var output in TerminalSession.ReadOutputAsync(_outputCts.Token))
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        switch (output.Kind)
+                        {
+                            case TerminalOutputKind.Data:
+                                if (_terminal is not null)
+                                    await _terminal.WriteAsync(output.Text);
+                                break;
+                            case TerminalOutputKind.Status:
+                                _terminalStatus = output.Text;
+                                if (_terminal is not null)
+                                    await _terminal.WriteAsync($"\r\n\x1b[2m{output.Text}\x1b[0m\r\n");
+                                break;
+                            case TerminalOutputKind.Error:
+                                _terminalError = output.Text;
+                                _terminalStatus = "Terminal error.";
+                                if (_terminal is not null)
+                                    await _terminal.WriteAsync($"\r\n\x1b[31m{output.Text}\x1b[0m\r\n");
+                                break;
+                            case TerminalOutputKind.Exited:
+                                _terminalConnected = false;
+                                _terminalStatus = output.Text;
+                                if (_terminal is not null)
+                                    await _terminal.WriteAsync($"\r\n\x1b[2m{output.Text}\x1b[0m\r\n");
+                                break;
+                        }
+
+                        StateHasChanged();
+                    });
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
     }
 
     private Task OnInputChanged(string value)
@@ -152,6 +294,78 @@
         _error = null;
     }
 
+    private async Task ConnectTerminalAsync(bool trustPresentedHostKey)
+    {
+        if (_selectedConnectionId is not Guid connectionId || _terminal is null || _connecting)
+            return;
+
+        _connecting = true;
+        _terminalError = null;
+        _hostKeyPrompt = null;
+        _terminalStatus = "Connecting...";
+
+        try
+        {
+            _terminalSize = await _terminal.FitAsync();
+            await _terminal.ResetAsync();
+            var result = await TerminalSession.ConnectAsync(connectionId, _terminalSize, trustPresentedHostKey);
+            if (result.Connected)
+            {
+                _terminalConnected = true;
+                _terminalStatus = $"Connected to {TerminalSession.ActiveConnection?.Name ?? "terminal"}.";
+                await _terminal.FocusAsync();
+            }
+            else if (result.HostKeyPrompt is not null)
+            {
+                _hostKeyPrompt = result.HostKeyPrompt;
+                _terminalStatus = "SSH host key trust required.";
+            }
+            else
+            {
+                _terminalError = result.ErrorMessage ?? "Terminal connection failed.";
+                _terminalStatus = "Terminal connection failed.";
+            }
+        }
+        finally
+        {
+            _connecting = false;
+        }
+    }
+
+    private async Task DisconnectTerminalAsync()
+    {
+        await TerminalSession.DisconnectAsync();
+        _terminalConnected = false;
+        _terminalStatus = "Disconnected.";
+    }
+
+    private async Task SendTerminalInputAsync(string data)
+    {
+        if (!_terminalConnected)
+            return;
+
+        await TerminalSession.SendAsync(data);
+    }
+
+    private async Task ResizeTerminalAsync(TerminalSize size)
+    {
+        _terminalReady = true;
+        _terminalSize = size;
+        if (_terminalConnected)
+            await TerminalSession.ResizeAsync(size);
+    }
+
+    private void DismissHostKeyPrompt()
+    {
+        _hostKeyPrompt = null;
+        _terminalStatus = "SSH host key trust cancelled.";
+    }
+
+    private void ClearTerminalError()
+    {
+        _terminalError = null;
+    }
+
     private static ChatRenderableMessage ToRenderable(AssistantMessage message)
     {
         var role = message.Role == AssistantMessageRole.User
@@ -170,5 +384,20 @@
             role,
             status,
             string.IsNullOrEmpty(message.Content) ? [] : [new ChatTextPart(message.Content)]);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _turnCts?.Cancel();
+        _turnCts?.Dispose();
+        _outputCts?.Cancel();
+        _outputCts?.Dispose();
+        try
+        {
+            await TerminalSession.DisconnectAsync();
+        }
+        catch
+        {
+        }
     }
 }

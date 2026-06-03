@@ -1,0 +1,404 @@
+@page "/settings/connections"
+@using Microsoft.AspNetCore.WebUtilities
+@using Shellmate.Models
+@rendermode InteractiveServer
+@inject ITerminalConnectionService ConnectionService
+@inject NavigationManager Nav
+
+<PageTitle>Connections</PageTitle>
+
+<div class="connections-page">
+    <header class="connections-header">
+        <div>
+            <h1>Connections</h1>
+            <p>Configure saved SSH and local terminal profiles.</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="@BackHref">Back to workspace</a>
+    </header>
+
+    @if (!string.IsNullOrEmpty(_statusMessage))
+    {
+        <div class="alert alert-@_statusKind alert-dismissible fade show" role="alert">
+            @_statusMessage
+            <button type="button" class="btn-close" @onclick="ClearStatus"></button>
+        </div>
+    }
+
+    <section class="connections-section">
+        <div class="section-heading">
+            <div>
+                <h2>Saved Profiles</h2>
+                <p>Select a profile in the workspace to open a terminal session.</p>
+            </div>
+            <button type="button" class="btn btn-primary" @onclick="StartCreate">New connection</button>
+        </div>
+
+        @if (_loading)
+        {
+            <div class="empty-state"><em>Loading connections...</em></div>
+        }
+        else if (_connections.Count == 0)
+        {
+            <div class="empty-state">No terminal connections configured yet.</div>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table align-middle connection-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Target</th>
+                            <th>Trust</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var connection in _connections)
+                        {
+                            <tr>
+                                <td>
+                                    <strong>@connection.Name</strong>
+                                </td>
+                                <td>@ConnectionKindLabel(connection.Kind)</td>
+                                <td>@TargetLabel(connection)</td>
+                                <td>@TrustLabel(connection)</td>
+                                <td>
+                                    <div class="connection-actions">
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => StartEditAsync(connection.Id)">Edit</button>
+                                        <button type="button" class="btn btn-sm btn-outline-danger" @onclick="() => DeleteAsync(connection.Id)">Delete</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    @if (_editing)
+    {
+        <section class="connections-section">
+            <div class="section-heading">
+                <div>
+                    <h2>@(_editingId is null ? "Add Connection" : "Edit Connection")</h2>
+                    <p>Secrets are saved through Shellmate's secret store and are never shown after saving.</p>
+                </div>
+            </div>
+
+            <EditForm Model="@_draft" OnSubmit="SaveAsync">
+                <div class="connection-form-grid">
+                    <div>
+                        <label class="form-label form-label-sm">Name</label>
+                        <InputText class="form-control form-control-sm" @bind-Value="_draft.Name" />
+                    </div>
+                    <div>
+                        <label class="form-label form-label-sm">Type</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="_draft.Kind">
+                            <option value="@TerminalConnectionKind.LocalShell">Local shell</option>
+                            <option value="@TerminalConnectionKind.Ssh">SSH</option>
+                        </InputSelect>
+                    </div>
+
+                    @if (_draft.Kind == TerminalConnectionKind.Ssh)
+                    {
+                        <div>
+                            <label class="form-label form-label-sm">Host</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="_draft.Host" />
+                        </div>
+                        <div>
+                            <label class="form-label form-label-sm">Port</label>
+                            <InputNumber class="form-control form-control-sm" @bind-Value="_draft.Port" />
+                        </div>
+                        <div>
+                            <label class="form-label form-label-sm">Username</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="_draft.Username" />
+                        </div>
+                        <div>
+                            <label class="form-label form-label-sm">Auth</label>
+                            <InputSelect class="form-select form-select-sm" @bind-Value="_draft.SshAuthType">
+                                <option value="@SshAuthenticationType.Password">Password</option>
+                                <option value="@SshAuthenticationType.PrivateKeyPath">Private key path</option>
+                            </InputSelect>
+                        </div>
+
+                        @if (_draft.SshAuthType == SshAuthenticationType.Password)
+                        {
+                            <div>
+                                <label class="form-label form-label-sm">Password</label>
+                                <InputText type="password" class="form-control form-control-sm" @bind-Value="_draft.Password" />
+                                @if (_secretStatus.HasPassword)
+                                {
+                                    <div class="form-check mt-1">
+                                        <InputCheckbox class="form-check-input" @bind-Value="_draft.ClearPassword" />
+                                        <label class="form-check-label small">Clear saved password</label>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        else
+                        {
+                            <div>
+                                <label class="form-label form-label-sm">Private key path</label>
+                                <InputText class="form-control form-control-sm" @bind-Value="_draft.PrivateKeyPath" />
+                            </div>
+                            <div>
+                                <label class="form-label form-label-sm">Key passphrase</label>
+                                <InputText type="password" class="form-control form-control-sm" @bind-Value="_draft.PrivateKeyPassphrase" />
+                                @if (_secretStatus.HasPrivateKeyPassphrase)
+                                {
+                                    <div class="form-check mt-1">
+                                        <InputCheckbox class="form-check-input" @bind-Value="_draft.ClearPrivateKeyPassphrase" />
+                                        <label class="form-check-label small">Clear saved passphrase</label>
+                                    </div>
+                                }
+                            </div>
+                        }
+
+                        @if (_editingId is not null && _editingTrustedHostKey is not null)
+                        {
+                            <div class="trusted-key">
+                                <span class="trusted-key-label">Trusted host key</span>
+                                <code>@_editingTrustedHostKey</code>
+                                <div class="form-check mt-1">
+                                    <InputCheckbox class="form-check-input" @bind-Value="_draft.ClearTrustedHostKey" />
+                                    <label class="form-check-label small">Clear trusted host key</label>
+                                </div>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <div>
+                            <label class="form-label form-label-sm">Shell path</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="_draft.LocalShellPath" placeholder="@DefaultShellPlaceholder" />
+                        </div>
+                        <div>
+                            <label class="form-label form-label-sm">Arguments</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="_draft.LocalShellArguments" />
+                        </div>
+                        <div>
+                            <label class="form-label form-label-sm">Working directory</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="_draft.LocalWorkingDirectory" />
+                        </div>
+                    }
+                </div>
+
+                <div class="connection-form-actions">
+                    <button type="submit" class="btn btn-primary" disabled="@_saving">@(_saving ? "Saving..." : "Save")</button>
+                    <button type="button" class="btn btn-link" @onclick="CancelEdit" disabled="@_saving">Cancel</button>
+                </div>
+            </EditForm>
+        </section>
+    }
+</div>
+
+@code {
+    private readonly List<TerminalConnection> _connections = [];
+    private ConnectionDraftModel _draft = ConnectionDraftModel.LocalDefault();
+    private TerminalConnectionSecretStatus _secretStatus = new(false, false);
+    private Guid? _editingId;
+    private string? _editingTrustedHostKey;
+    private string? _returnUrl;
+    private string? _statusMessage;
+    private string _statusKind = "info";
+    private bool _loading = true;
+    private bool _editing;
+    private bool _saving;
+
+    private string BackHref => string.IsNullOrWhiteSpace(_returnUrl) ? "/" : _returnUrl;
+    private static string DefaultShellPlaceholder => OperatingSystem.IsWindows() ? "pwsh.exe" : "$SHELL";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var uri = Nav.ToAbsoluteUri(Nav.Uri);
+        var query = QueryHelpers.ParseQuery(uri.Query);
+        if (query.TryGetValue("returnUrl", out var returnUrl))
+            _returnUrl = returnUrl.FirstOrDefault();
+
+        await ReloadAsync();
+        if (_connections.Count == 0)
+            StartCreate();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _connections.Clear();
+        _connections.AddRange(await ConnectionService.ListAsync());
+        _loading = false;
+    }
+
+    private void StartCreate()
+    {
+        _editing = true;
+        _editingId = null;
+        _editingTrustedHostKey = null;
+        _secretStatus = new TerminalConnectionSecretStatus(false, false);
+        _draft = ConnectionDraftModel.LocalDefault();
+    }
+
+    private async Task StartEditAsync(Guid id)
+    {
+        var connection = await ConnectionService.GetAsync(id);
+        if (connection is null)
+            return;
+
+        _editing = true;
+        _editingId = id;
+        _editingTrustedHostKey = connection.TrustedHostKeyFingerprintSha256 is null
+            ? null
+            : $"SHA256:{connection.TrustedHostKeyFingerprintSha256}";
+        _secretStatus = await ConnectionService.GetSecretStatusAsync(id);
+        _draft = ConnectionDraftModel.From(connection);
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving)
+            return;
+
+        _saving = true;
+        try
+        {
+            var draft = _draft.ToServiceDraft();
+            if (_editingId is Guid id)
+            {
+                await ConnectionService.UpdateAsync(id, draft);
+                SetStatus("Connection updated.", "success");
+            }
+            else
+            {
+                await ConnectionService.CreateAsync(draft);
+                SetStatus("Connection created.", "success");
+                if (!string.IsNullOrWhiteSpace(_returnUrl))
+                {
+                    Nav.NavigateTo(_returnUrl);
+                    return;
+                }
+            }
+
+            _editing = false;
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, "danger");
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync(Guid id)
+    {
+        await ConnectionService.DeleteAsync(id);
+        SetStatus("Connection deleted.", "success");
+        if (_editingId == id)
+            CancelEdit();
+        await ReloadAsync();
+    }
+
+    private void CancelEdit()
+    {
+        _editing = false;
+        _editingId = null;
+        _editingTrustedHostKey = null;
+        _draft = ConnectionDraftModel.LocalDefault();
+        _secretStatus = new TerminalConnectionSecretStatus(false, false);
+    }
+
+    private void ClearStatus()
+    {
+        _statusMessage = null;
+    }
+
+    private void SetStatus(string message, string kind)
+    {
+        _statusMessage = message;
+        _statusKind = kind;
+    }
+
+    private static string ConnectionKindLabel(TerminalConnectionKind kind) =>
+        kind == TerminalConnectionKind.Ssh ? "SSH" : "Local shell";
+
+    private static string TargetLabel(TerminalConnection connection) =>
+        connection.Kind switch
+        {
+            TerminalConnectionKind.Ssh => $"{connection.Username}@{connection.Host}:{connection.Port}",
+            _ => string.IsNullOrWhiteSpace(connection.LocalShellPath) ? "Default shell" : connection.LocalShellPath
+        };
+
+    private static string TrustLabel(TerminalConnection connection)
+    {
+        if (connection.Kind != TerminalConnectionKind.Ssh)
+            return "-";
+
+        return string.IsNullOrWhiteSpace(connection.TrustedHostKeyFingerprintSha256)
+            ? "Not trusted yet"
+            : $"SHA256:{connection.TrustedHostKeyFingerprintSha256}";
+    }
+
+    private sealed class ConnectionDraftModel
+    {
+        public string Name { get; set; } = string.Empty;
+        public TerminalConnectionKind Kind { get; set; } = TerminalConnectionKind.LocalShell;
+        public string? Host { get; set; }
+        public int Port { get; set; } = 22;
+        public string? Username { get; set; }
+        public SshAuthenticationType SshAuthType { get; set; } = SshAuthenticationType.Password;
+        public string? PrivateKeyPath { get; set; }
+        public string? LocalShellPath { get; set; }
+        public string? LocalShellArguments { get; set; }
+        public string? LocalWorkingDirectory { get; set; }
+        public string? Password { get; set; }
+        public bool ClearPassword { get; set; }
+        public string? PrivateKeyPassphrase { get; set; }
+        public bool ClearPrivateKeyPassphrase { get; set; }
+        public bool ClearTrustedHostKey { get; set; }
+
+        public static ConnectionDraftModel LocalDefault() =>
+            new()
+            {
+                Name = "Local Shell",
+                Kind = TerminalConnectionKind.LocalShell,
+                LocalWorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            };
+
+        public static ConnectionDraftModel From(TerminalConnection connection) =>
+            new()
+            {
+                Name = connection.Name,
+                Kind = connection.Kind,
+                Host = connection.Host,
+                Port = connection.Port,
+                Username = connection.Username,
+                SshAuthType = connection.SshAuthType,
+                PrivateKeyPath = connection.PrivateKeyPath,
+                LocalShellPath = connection.LocalShellPath,
+                LocalShellArguments = connection.LocalShellArguments,
+                LocalWorkingDirectory = connection.LocalWorkingDirectory
+            };
+
+        public TerminalConnectionDraft ToServiceDraft() =>
+            new(
+                Name,
+                Kind,
+                Host,
+                Port,
+                Username,
+                SshAuthType,
+                PrivateKeyPath,
+                LocalShellPath,
+                LocalShellArguments,
+                LocalWorkingDirectory,
+                Password,
+                ClearPassword,
+                PrivateKeyPassphrase,
+                ClearPrivateKeyPassphrase,
+                ClearTrustedHostKey);
+    }
+}

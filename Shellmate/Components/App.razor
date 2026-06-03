@@ -7,6 +7,7 @@
     <base href="/" />
     <ResourcePreloader />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
+    <link rel="stylesheet" href="@Assets["lib/xterm/xterm.css"]" />
     <link rel="stylesheet" href="@Assets["app.css"]" />
     <link rel="stylesheet" href="@Assets["Shellmate.styles.css"]" />
     <ImportMap />
@@ -17,6 +18,8 @@
 <body>
     <Routes />
     <ReconnectModal />
+    <script src="@Assets["lib/xterm/xterm.js"]"></script>
+    <script src="@Assets["lib/xterm/addon-fit.js"]"></script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>
 

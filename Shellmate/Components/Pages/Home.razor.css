@@ -2,10 +2,127 @@
     height: 100vh;
     min-height: 0;
     display: grid;
+    grid-template-columns: minmax(20rem, 1fr) minmax(36rem, 2fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.75rem;
     background: #f7f8fa;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
-.workspace-main {
+.workspace-chat,
+.workspace-terminal {
     min-height: 0;
     height: 100%;
+    min-width: 0;
+}
+
+.workspace-chat {
+    overflow: hidden;
+}
+
+.workspace-terminal {
+    display: grid;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    border: 1px solid #17212b;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0b1117;
+}
+
+.terminal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0.85rem;
+    border-bottom: 1px solid #263241;
+    background: #111827;
+    color: #d1d5db;
+}
+
+.terminal-heading {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.terminal-title {
+    font-weight: 650;
+    color: #f9fafb;
+}
+
+.terminal-subtitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #9ca3af;
+    font-size: 0.82rem;
+}
+
+.terminal-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.terminal-select {
+    width: min(18rem, 32vw);
+}
+
+.terminal-host-key-alert,
+.terminal-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.65rem 0.85rem;
+}
+
+.terminal-host-key-alert {
+    border-bottom: 1px solid #854d0e;
+    background: #fffbeb;
+    color: #713f12;
+}
+
+.terminal-host-key-alert > div:first-child {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.terminal-host-key-alert code {
+    overflow-wrap: anywhere;
+}
+
+.terminal-host-key-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.4rem;
+}
+
+.terminal-error {
+    border-bottom: 1px solid #7f1d1d;
+    background: #fee2e2;
+    color: #7f1d1d;
+}
+
+::deep .workspace-terminal-surface {
+    grid-row: 4;
+    min-height: 0;
+}
+
+.workspace-loading {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #667085;
+    background: #f7f8fa;
 }

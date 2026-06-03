@@ -5,10 +5,12 @@ using Microsoft.EntityFrameworkCore;
 using Shellmate.Auth;
 using Shellmate.Chat;
 using Shellmate.Components;
+using Shellmate.Connections;
 using Shellmate.Llm;
 using Shellmate.Persistence;
 using Shellmate.Persistence.Repositories;
 using Shellmate.Secrets;
+using Shellmate.Terminal;
 
 var builder = WebApplication.CreateBuilder(args);
 var isElectronMode = IsElectronMode(args);
@@ -34,19 +36,22 @@ builder.Services.AddShellmatePersistence(builder.Configuration);
 builder.Services.AddScoped<ILlmProviderRepository, LlmProviderRepository>();
 builder.Services.AddScoped<IOAuthTokenRepository, OAuthTokenRepository>();
 builder.Services.AddScoped<IAssistantConversationRepository, AssistantConversationRepository>();
+builder.Services.AddScoped<ITerminalConnectionRepository, TerminalConnectionRepository>();
 builder.Services.AddScoped<ISecretStore, SqliteSecretStore>();
 builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
 builder.Services.AddScoped<ILlmProviderService, LlmProviderService>();
 builder.Services.AddScoped<ICodexAuthService, CodexAuthService>();
 builder.Services.AddScoped<IChatClientFactory, ChatClientFactory>();
 builder.Services.AddScoped<IAssistantChatService, AssistantChatService>();
+builder.Services.AddScoped<ITerminalConnectionService, TerminalConnectionService>();
+builder.Services.AddScoped<ITerminalSessionService, TerminalSessionService>();
 
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.EnsureCreatedAsync();
+    await DatabaseMigrationBootstrapper.MigrateAsync(db);
     if (db.Database.GetDbConnection() is SqliteConnection sqliteConnection)
     {
         await sqliteConnection.OpenAsync();
