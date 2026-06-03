@@ -1,4 +1,6 @@
-﻿@inherits LayoutComponentBase
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject ITerminalSessionService TerminalSession
 
 <div class="page">
     <div class="sidebar">
@@ -12,8 +14,107 @@
     </main>
 </div>
 
+@if (_elevationPrompt is not null)
+{
+    <div class="elevation-backdrop" role="presentation">
+        <div class="elevation-dialog" role="dialog" aria-modal="true" aria-labelledby="elevation-title">
+            <div id="elevation-title" class="elevation-title">Terminal Password Required</div>
+            <div class="elevation-meta">@ElevationPromptMeta</div>
+            <div class="elevation-command">@_elevationPrompt.Command</div>
+            <label class="elevation-prompt" for="elevation-password">@_elevationPrompt.PromptText</label>
+            <input id="elevation-password"
+                   @ref="_elevationPasswordInput"
+                   class="form-control"
+                   type="password"
+                   autocomplete="current-password"
+                   @bind="_elevationPassword"
+                   @bind:event="oninput"
+                   @onkeydown="OnElevationPasswordKeyDown" />
+            <div class="elevation-actions">
+                <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="DenyElevationPrompt">Deny</button>
+                <button type="button" class="btn btn-sm btn-primary" @onclick="ApproveElevationPrompt">Send Once</button>
+            </div>
+        </div>
+    </div>
+}
+
 <div id="blazor-error-ui" data-nosnippet>
     An unhandled error has occurred.
     <a href="." class="reload">Reload</a>
-    <span class="dismiss">🗙</span>
+    <span class="dismiss">x</span>
 </div>
+
+@code {
+    private TerminalElevationPrompt? _elevationPrompt;
+    private ElementReference _elevationPasswordInput;
+    private Guid? _focusedElevationPromptId;
+    private string _elevationPassword = string.Empty;
+
+    private string ElevationPromptMeta => _elevationPrompt is null
+        ? string.Empty
+        : _elevationPrompt.Attempt <= 1
+            ? $"{_elevationPrompt.ConnectionName} is requesting a password for this command."
+            : $"{_elevationPrompt.ConnectionName} is requesting a password for this command. Attempt {_elevationPrompt.Attempt}.";
+
+    protected override void OnInitialized()
+    {
+        _elevationPrompt = TerminalSession.PendingElevationPrompt;
+        TerminalSession.StateChanged += OnTerminalStateChanged;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_elevationPrompt is null || _focusedElevationPromptId == _elevationPrompt.Id)
+            return;
+
+        _focusedElevationPromptId = _elevationPrompt.Id;
+        try
+        {
+            await _elevationPasswordInput.FocusAsync();
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnTerminalStateChanged()
+    {
+        _ = InvokeAsync(() =>
+        {
+            var nextPrompt = TerminalSession.PendingElevationPrompt;
+            if (_elevationPrompt?.Id != nextPrompt?.Id)
+            {
+                _elevationPassword = string.Empty;
+                _focusedElevationPromptId = null;
+            }
+
+            _elevationPrompt = nextPrompt;
+            StateHasChanged();
+        });
+    }
+
+    private async Task ApproveElevationPrompt()
+    {
+        await TerminalSession.RespondToElevationPromptAsync(new TerminalElevationResponse(
+            Approved: true,
+            Password: _elevationPassword));
+    }
+
+    private async Task DenyElevationPrompt()
+    {
+        await TerminalSession.RespondToElevationPromptAsync(new TerminalElevationResponse(
+            Approved: false,
+            Password: null));
+    }
+
+    private async Task OnElevationPasswordKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+            await ApproveElevationPrompt();
+    }
+
+    public void Dispose()
+    {
+        TerminalSession.StateChanged -= OnTerminalStateChanged;
+    }
+}

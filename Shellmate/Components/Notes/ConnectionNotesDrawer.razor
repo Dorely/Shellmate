@@ -1,11 +1,9 @@
 @namespace Shellmate.Components.Notes
 @inject IConnectionNoteService Notes
 
-@if (Open)
-{
-    <div class="notes-layer">
-        <button type="button" class="notes-backdrop" aria-label="Close notes" @onclick="CloseAsync"></button>
-        <aside class="notes-drawer" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+<div class="notes-layer @(Open ? "open" : string.Empty)" aria-hidden="@(Open ? "false" : "true")">
+    <button type="button" class="notes-backdrop" aria-label="Close notes" @onclick="CloseAsync"></button>
+    <aside class="notes-drawer" role="dialog" aria-modal="true" aria-labelledby="notes-title">
             <header class="notes-header">
                 <div>
                     <div id="notes-title" class="notes-title">Notes</div>
@@ -113,9 +111,8 @@
                     </section>
                 </div>
             }
-        </aside>
-    </div>
-}
+    </aside>
+</div>
 
 @code {
     private readonly List<ConnectionNoteSummary> _notes = [];

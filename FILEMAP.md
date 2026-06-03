@@ -40,7 +40,8 @@
 
 | File | Description |
 |------|-------------|
-| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent global assistant chat service with provider resolution, manual tool-call loop, shared assistant tool invocation, cancellation, reset, and transcript persistence. |
+| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent assistant turn service with provider resolution, manual tool-call loop, shared tool invocation, cancellation, reset, and transcript persistence. |
+| `IWorkspaceChatRuntime.cs` / `WorkspaceChatRuntime.cs` | App-process chat runtime that keeps active assistant turns alive across route changes and renderer reloads, with live-turn state and note-change notifications. |
 | `AssistantPromptBuilder.cs` | Builds the app-owned assistant system prompt with tool-use rules, visible note guidance, and dynamic terminal context. |
 | `AssistantToolRegistry.cs` | Shared assistant tool registry that combines shell and note tools for model requests and token-count previews. |
 | `AssistantShellTools.cs` | Defines shell inspection and command-execution tools over the currently connected terminal session. |
@@ -80,7 +81,7 @@
 
 | File | Description |
 |------|-------------|
-| `MainLayout.razor` / `.razor.css` | Desktop-style app shell with left navigation and full-height content area. |
+| `MainLayout.razor` / `.razor.css` | Desktop-style app shell with left navigation, full-height content area, and global terminal elevation prompt dialog. |
 | `NavMenu.razor` / `.razor.css` | Sidebar navigation for Chat, Providers, and Connections. |
 | `ReconnectModal.razor` / `.razor.css` / `.razor.js` | Template reconnect UI shown when the SignalR circuit drops. |
 
@@ -88,7 +89,7 @@
 
 | File | Description |
 |------|-------------|
-| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat with live model-input token count, terminal session, live tool chips, and terminal password approval modal. |
+| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; attaches to persistent chat/terminal runtimes, shows token counts, terminal UI, live tool chips, and notes drawer. |
 | `NotFound.razor` | 404 page wired through status-code re-execution. |
 | `Error.razor` | Error page rendered by exception handler middleware. |
 | `Settings/Providers.razor` / `.razor.css` | Provider settings page for OpenAI account OAuth, OpenAI-compatible endpoints, model tests, defaults, API-key updates, and child model rows. |
@@ -101,7 +102,7 @@
 | `ConnectionSecretNames.cs` | Centralized secret key names for SSH passwords and private-key passphrases. |
 | `ITerminalConnectionService.cs` / `TerminalConnectionService.cs` | Connection profile CRUD, validation, credential secret handling, and SSH host-key trust updates. |
 | `TerminalConnectionModels.cs` | Service DTOs for connection drafts, shell-kind hints, secret status, and trusted SSH host-key metadata. |
-| `IWorkspaceConnectionContext.cs` / `WorkspaceConnectionContext.cs` | Scoped workspace-selected connection context shared by the UI and assistant note tools. |
+| `IWorkspaceConnectionContext.cs` / `WorkspaceConnectionContext.cs` | App-process workspace-selected connection context shared by the UI and assistant note tools. |
 
 ### Notes/
 
@@ -172,7 +173,7 @@
 | File | Description |
 |------|-------------|
 | `ITerminalBackendSession.cs` | Common backend interface for local PTY and SSH terminal sessions. |
-| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | Per-circuit terminal coordinator for connect, input/output teeing, snapshots, serialized command execution, elevation prompts, resize, and cleanup. |
+| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | App-process terminal coordinator for persistent sessions, replayable UI output subscriptions, snapshots, command execution, elevation prompts, resize, and cleanup. |
 | `LocalTerminalSession.cs` | Quick.PtyNet-backed local shell session with platform shell defaults and PTY cleanup. |
 | `SshTerminalSession.cs` | SSH.NET-backed shell session with password/private-key auth, `xterm-256color`, resize, and host-key trust checks. |
 | `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, snapshots, command records/results, elevation prompts, connect results, and resolved SSH credentials. |

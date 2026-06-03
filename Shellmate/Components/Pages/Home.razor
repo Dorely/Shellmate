@@ -11,6 +11,7 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @inject IAssistantChatService ChatService
+@inject IWorkspaceChatRuntime ChatRuntime
 @inject ILlmProviderService ProviderService
 @inject ITerminalConnectionService ConnectionService
 @inject IConnectionNoteService NoteService
@@ -129,30 +130,6 @@ else
                            OpenChanged="OnNotesOpenChangedAsync"
                            ConnectionId="@_selectedConnectionId"
                            ConnectionName="@SelectedConnectionName" />
-
-    @if (_elevationPrompt is not null)
-    {
-        <div class="elevation-backdrop" role="presentation">
-            <div class="elevation-dialog" role="dialog" aria-modal="true" aria-labelledby="elevation-title">
-                <div id="elevation-title" class="elevation-title">Terminal Password Required</div>
-                <div class="elevation-meta">@ElevationPromptMeta</div>
-                <div class="elevation-command">@_elevationPrompt.Command</div>
-                <label class="elevation-prompt" for="elevation-password">@_elevationPrompt.PromptText</label>
-                <input id="elevation-password"
-                       @ref="_elevationPasswordInput"
-                       class="form-control"
-                       type="password"
-                       autocomplete="current-password"
-                       @bind="_elevationPassword"
-                       @bind:event="oninput"
-                       @onkeydown="OnElevationPasswordKeyDown" />
-                <div class="elevation-actions">
-                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="DenyElevationPrompt">Deny</button>
-                    <button type="button" class="btn btn-sm btn-primary" @onclick="ApproveElevationPrompt">Send Once</button>
-                </div>
-            </div>
-        </div>
-    }
 }
 
 @code {
@@ -164,23 +141,17 @@ else
     private readonly List<TerminalConnection> _connections = [];
     private List<string> _toolDefinitions = [];
     private ChatLiveTurn? _live;
-    private CancellationTokenSource? _turnCts;
     private CancellationTokenSource? _outputCts;
     private TerminalSurface? _terminal;
     private ConnectionNotesDrawer? _notesDrawer;
     private LlmProvider? _activeProvider;
     private TerminalSize _terminalSize = TerminalSize.Default;
     private TerminalHostKeyPrompt? _hostKeyPrompt;
-    private TerminalElevationPrompt? _elevationPrompt;
-    private TaskCompletionSource<TerminalElevationResponse>? _elevationResponse;
-    private ElementReference _elevationPasswordInput;
-    private Guid? _focusedElevationPromptId;
     private Guid? _selectedConnectionId;
     private string _input = string.Empty;
     private string? _pendingUserText;
     private string _systemPrompt = string.Empty;
     private AssistantNoteContext _noteContext = AssistantNoteContext.Unavailable("No workspace connection is selected.");
-    private string _elevationPassword = string.Empty;
     private string? _error;
     private string? _terminalError;
     private string _providerSubtitle = "Checking provider status...";
@@ -214,24 +185,11 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        TerminalSession.SetElevationPromptHandler(RequestElevationAsync);
+        TerminalSession.StateChanged += OnTerminalStateChanged;
+        ChatRuntime.StateChanged += OnChatRuntimeStateChanged;
+        ChatRuntime.NotesChanged += OnChatRuntimeNotesChanged;
         await ReloadAsync();
-        StartTerminalOutputPump();
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (_elevationPrompt is null || _focusedElevationPromptId == _elevationPrompt.Id)
-            return;
-
-        _focusedElevationPromptId = _elevationPrompt.Id;
-        try
-        {
-            await _elevationPasswordInput.FocusAsync();
-        }
-        catch
-        {
-        }
+        ApplyChatRuntimeSnapshot(ChatRuntime.GetSnapshot());
     }
 
     private async Task ReloadAsync()
@@ -254,8 +212,16 @@ else
             return;
         }
 
-        _selectedConnectionId ??= _connections[0].Id;
+        _selectedConnectionId ??= WorkspaceConnection.SelectedConnectionId;
+        if (_selectedConnectionId is null || _connections.All(connection => connection.Id != _selectedConnectionId))
+        {
+            var activeConnectionId = TerminalSession.ActiveConnection?.Id;
+            _selectedConnectionId = activeConnectionId is Guid id && _connections.Any(connection => connection.Id == id)
+                ? id
+                : _connections[0].Id;
+        }
         SetSelectedConnection(_selectedConnectionId);
+        UpdateTerminalStateFromRuntime();
 
         var availability = await ProviderService.GetDefaultChatProviderAvailabilityAsync();
         _hasWorkingProvider = availability.IsAvailable && availability.Provider is not null;
@@ -267,10 +233,14 @@ else
 
         _loading = false;
         _forceScrollKey++;
+        ApplyChatRuntimeSnapshot(ChatRuntime.GetSnapshot());
     }
 
     private void StartTerminalOutputPump()
     {
+        if (_outputCts is not null)
+            return;
+
         _outputCts?.Cancel();
         _outputCts?.Dispose();
         _outputCts = new CancellationTokenSource();
@@ -278,7 +248,7 @@ else
         {
             try
             {
-                await foreach (var output in TerminalSession.ReadOutputAsync(_outputCts.Token))
+                await foreach (var output in TerminalSession.SubscribeOutputAsync(includeReplay: true, _outputCts.Token))
                 {
                     await InvokeAsync(async () =>
                     {
@@ -318,6 +288,65 @@ else
         });
     }
 
+    private void OnTerminalStateChanged()
+    {
+        _ = InvokeAsync(() =>
+        {
+            UpdateTerminalStateFromRuntime();
+            RefreshConversationTokenInputs();
+            StateHasChanged();
+        });
+    }
+
+    private void OnChatRuntimeStateChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            var wasRunning = _running;
+            var snapshot = ChatRuntime.GetSnapshot();
+            ApplyChatRuntimeSnapshot(snapshot);
+            if (wasRunning && !snapshot.Running)
+            {
+                await ReloadAsync();
+                return;
+            }
+
+            _scrollKey++;
+            StateHasChanged();
+        });
+    }
+
+    private void OnChatRuntimeNotesChanged()
+    {
+        _ = InvokeAsync(RefreshNotesAfterToolAsync);
+    }
+
+    private void ApplyChatRuntimeSnapshot(WorkspaceChatRuntimeSnapshot snapshot)
+    {
+        _running = snapshot.Running;
+        _live = snapshot.Live;
+        _pendingUserText = snapshot.PendingUserText;
+        _error = snapshot.Error;
+        UpdateConversationTokenCount();
+    }
+
+    private void UpdateTerminalStateFromRuntime()
+    {
+        _terminalConnected = TerminalSession.IsConnected;
+        if (_terminalConnected)
+        {
+            _terminalStatus = $"Connected to {TerminalSession.ActiveConnection?.Name ?? "terminal"}.";
+            return;
+        }
+
+        if (_connecting)
+            return;
+
+        _terminalStatus = _selectedConnectionId is null
+            ? "Select a connection to open a terminal."
+            : "Terminal is not connected.";
+    }
+
     private Task OnInputChanged(string value)
     {
         _input = value;
@@ -333,10 +362,7 @@ else
         _input = string.Empty;
         _resetComposerKey++;
         _error = null;
-        _running = true;
-        _live = new ChatLiveTurn();
         _pendingUserText = text;
-        _turnCts = new CancellationTokenSource();
 
         _messages.Add(new ChatRenderableMessage(
             Guid.NewGuid(),
@@ -348,55 +374,21 @@ else
 
         try
         {
-            await foreach (var update in ChatService.SendAsync(text, _turnCts.Token))
-            {
-                switch (update)
-                {
-                    case AssistantTextDelta delta:
-                        _live.AppendText(delta.Text);
-                        UpdateConversationTokenCount();
-                        _scrollKey++;
-                        break;
-                    case AssistantToolCallStarted started:
-                        _live.StartToolCall(started.CallId, started.ToolName, started.ArgumentsJson, started.ArgumentsComplete);
-                        UpdateConversationTokenCount();
-                        _scrollKey++;
-                        break;
-                    case AssistantToolCallArgumentsDelta delta:
-                        _live.AppendToolArguments(delta.CallId, delta.ArgumentsDelta, delta.ArgumentsComplete);
-                        UpdateConversationTokenCount();
-                        _scrollKey++;
-                        break;
-                    case AssistantToolCallCompleted completed:
-                        _live.CompleteToolCall(completed.CallId, completed.Result, completed.Error, completed.DurationMs);
-                        if (IsNoteTool(completed.ToolName))
-                            await RefreshNotesAfterToolAsync();
-                        UpdateConversationTokenCount();
-                        _scrollKey++;
-                        break;
-                    case AssistantTurnError turnError:
-                        _error = turnError.Message;
-                        break;
-                }
-
-                await InvokeAsync(StateHasChanged);
-            }
+            await ChatRuntime.StartTurnAsync(text);
+            ApplyChatRuntimeSnapshot(ChatRuntime.GetSnapshot());
         }
-        finally
+        catch (Exception ex)
         {
+            _error = ex.Message;
             _running = false;
-            _turnCts?.Dispose();
-            _turnCts = null;
-            _live = null;
             _pendingUserText = null;
-            await ReloadAsync();
+            UpdateConversationTokenCount();
         }
     }
 
     private Task StopAsync()
     {
-        _turnCts?.Cancel();
-        return Task.CompletedTask;
+        return ChatRuntime.StopTurnAsync();
     }
 
     private async Task ResetAsync()
@@ -404,7 +396,7 @@ else
         if (_running)
             return;
 
-        await ChatService.ResetAsync();
+        await ChatRuntime.ResetConversationAsync();
         _error = null;
         _input = string.Empty;
         _pendingUserText = null;
@@ -416,6 +408,7 @@ else
     private void ClearError()
     {
         _error = null;
+        ChatRuntime.ClearError();
     }
 
     private async Task OnSelectedConnectionChangedAsync(ChangeEventArgs args)
@@ -518,6 +511,7 @@ else
     {
         _terminalReady = true;
         _terminalSize = size;
+        StartTerminalOutputPump();
         if (_terminalConnected)
             await TerminalSession.ResizeAsync(size);
     }
@@ -531,65 +525,6 @@ else
     private void ClearTerminalError()
     {
         _terminalError = null;
-    }
-
-    private string ElevationPromptMeta => _elevationPrompt is null
-        ? string.Empty
-        : _elevationPrompt.Attempt <= 1
-            ? $"{_elevationPrompt.ConnectionName} is requesting a password for this command."
-            : $"{_elevationPrompt.ConnectionName} is requesting a password for this command. Attempt {_elevationPrompt.Attempt}.";
-
-    private async Task<TerminalElevationResponse> RequestElevationAsync(
-        TerminalElevationPrompt prompt,
-        CancellationToken cancellationToken)
-    {
-        var completion = new TaskCompletionSource<TerminalElevationResponse>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        using var registration = cancellationToken.Register(() =>
-            completion.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null)));
-
-        await InvokeAsync(() =>
-        {
-            _elevationPrompt = prompt;
-            _elevationPassword = string.Empty;
-            _elevationResponse = completion;
-            StateHasChanged();
-        });
-
-        var response = await completion.Task;
-        await InvokeAsync(() =>
-        {
-            if (ReferenceEquals(_elevationResponse, completion))
-            {
-                _elevationPrompt = null;
-                _elevationResponse = null;
-                _elevationPassword = string.Empty;
-            }
-
-            StateHasChanged();
-        });
-
-        return response;
-    }
-
-    private void ApproveElevationPrompt()
-    {
-        _elevationResponse?.TrySetResult(new TerminalElevationResponse(
-            Approved: true,
-            Password: _elevationPassword));
-    }
-
-    private void DenyElevationPrompt()
-    {
-        _elevationResponse?.TrySetResult(new TerminalElevationResponse(
-            Approved: false,
-            Password: null));
-    }
-
-    private void OnElevationPasswordKeyDown(KeyboardEventArgs args)
-    {
-        if (args.Key == "Enter")
-            ApproveElevationPrompt();
     }
 
     private void RefreshConversationTokenInputs()
@@ -751,27 +686,14 @@ else
         return chip;
     }
 
-    private static bool IsNoteTool(string toolName) => toolName is
-        "list_connection_notes" or
-        "read_connection_note" or
-        "create_connection_note" or
-        "rename_connection_note" or
-        "update_connection_note" or
-        "delete_connection_note";
-
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        TerminalSession.SetElevationPromptHandler(null);
-        _turnCts?.Cancel();
-        _turnCts?.Dispose();
+        TerminalSession.StateChanged -= OnTerminalStateChanged;
+        ChatRuntime.StateChanged -= OnChatRuntimeStateChanged;
+        ChatRuntime.NotesChanged -= OnChatRuntimeNotesChanged;
         _outputCts?.Cancel();
         _outputCts?.Dispose();
-        try
-        {
-            await TerminalSession.DisconnectAsync();
-        }
-        catch
-        {
-        }
+        _outputCts = null;
+        return ValueTask.CompletedTask;
     }
 }

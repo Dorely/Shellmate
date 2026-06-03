@@ -6,9 +6,12 @@ public interface ITerminalSessionService : IAsyncDisposable
 {
     TerminalConnection? ActiveConnection { get; }
     bool IsConnected { get; }
+    TerminalElevationPrompt? PendingElevationPrompt { get; }
+    event Action? StateChanged;
     TerminalSnapshot GetSnapshot();
-    void SetElevationPromptHandler(Func<TerminalElevationPrompt, CancellationToken, Task<TerminalElevationResponse>>? handler);
-    IAsyncEnumerable<TerminalOutput> ReadOutputAsync(CancellationToken cancellationToken = default);
+    IAsyncEnumerable<TerminalOutput> SubscribeOutputAsync(
+        bool includeReplay = true,
+        CancellationToken cancellationToken = default);
     Task<TerminalConnectResult> ConnectAsync(
         Guid connectionId,
         TerminalSize size,
@@ -20,5 +23,6 @@ public interface ITerminalSessionService : IAsyncDisposable
         TimeSpan timeout,
         CancellationToken cancellationToken = default);
     Task ResizeAsync(TerminalSize size, CancellationToken cancellationToken = default);
+    Task RespondToElevationPromptAsync(TerminalElevationResponse response);
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }

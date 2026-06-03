@@ -11,9 +11,7 @@ using Shellmate.Secrets;
 namespace Shellmate.Terminal;
 
 public sealed partial class TerminalSessionService(
-    ITerminalConnectionRepository connections,
-    ITerminalConnectionService connectionService,
-    ISecretStore secrets,
+    IServiceScopeFactory scopeFactory,
     IOptions<AgentOptions> options,
     ILogger<TerminalSessionService> logger) : ITerminalSessionService
 {
@@ -21,25 +19,29 @@ public sealed partial class TerminalSessionService(
     private const string Interrupt = "\x03";
     private const int MaxElevationPromptAttempts = 3;
 
-    private readonly Channel<TerminalOutput> _output = Channel.CreateUnbounded<TerminalOutput>();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _commandGate = new(1, 1);
     private readonly object _historyGate = new();
+    private readonly object _outputGate = new();
+    private readonly object _stateGate = new();
     private readonly StringBuilder _recentOutput = new();
     private readonly StringBuilder _userInputBuffer = new();
     private readonly List<TerminalCommandRecord> _recentCommands = [];
+    private readonly List<TerminalOutput> _replayOutputs = [];
+    private readonly List<Channel<TerminalOutput>> _subscribers = [];
     private ITerminalBackendSession? _activeSession;
     private CancellationTokenSource? _pumpCts;
     private Task? _pumpTask;
     private ShellCommandExecution? _activeCommand;
-    private Func<TerminalElevationPrompt, CancellationToken, Task<TerminalElevationResponse>>? _elevationPromptHandler;
+    private TaskCompletionSource<TerminalElevationResponse>? _elevationResponse;
+    private int _replayCharacterCount;
     private bool _disposed;
 
     public TerminalConnection? ActiveConnection { get; private set; }
     public bool IsConnected => _activeSession is not null;
+    public event Action? StateChanged;
 
-    public void SetElevationPromptHandler(Func<TerminalElevationPrompt, CancellationToken, Task<TerminalElevationResponse>>? handler) =>
-        _elevationPromptHandler = handler;
+    public TerminalElevationPrompt? PendingElevationPrompt { get; private set; }
 
     public TerminalSnapshot GetSnapshot()
     {
@@ -57,8 +59,35 @@ public sealed partial class TerminalSessionService(
         }
     }
 
-    public IAsyncEnumerable<TerminalOutput> ReadOutputAsync(CancellationToken cancellationToken = default) =>
-        _output.Reader.ReadAllAsync(cancellationToken);
+    public async IAsyncEnumerable<TerminalOutput> SubscribeOutputAsync(
+        bool includeReplay = true,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var channel = Channel.CreateUnbounded<TerminalOutput>();
+        lock (_outputGate)
+        {
+            if (includeReplay)
+            {
+                foreach (var output in _replayOutputs)
+                    channel.Writer.TryWrite(output);
+            }
+
+            _subscribers.Add(channel);
+        }
+
+        try
+        {
+            await foreach (var output in channel.Reader.ReadAllAsync(cancellationToken))
+                yield return output;
+        }
+        finally
+        {
+            lock (_outputGate)
+                _subscribers.Remove(channel);
+
+            channel.Writer.TryComplete();
+        }
+    }
 
     public async Task<TerminalConnectResult> ConnectAsync(
         Guid connectionId,
@@ -72,6 +101,10 @@ public sealed partial class TerminalSessionService(
             ThrowIfDisposed();
             await DisconnectCoreAsync(cancellationToken);
 
+            using var scope = scopeFactory.CreateScope();
+            var connections = scope.ServiceProvider.GetRequiredService<ITerminalConnectionRepository>();
+            var connectionService = scope.ServiceProvider.GetRequiredService<ITerminalConnectionService>();
+            var secrets = scope.ServiceProvider.GetRequiredService<ISecretStore>();
             var connection = await connections.GetByIdAsync(connectionId, cancellationToken);
             if (connection is null)
                 return TerminalConnectResult.Error("Connection was not found.");
@@ -119,6 +152,7 @@ public sealed partial class TerminalSessionService(
             await WriteUiOutputAsync(
                 new TerminalOutput(TerminalOutputKind.Status, $"Connected to {connection.Name}."),
                 cancellationToken);
+            NotifyStateChanged();
             return TerminalConnectResult.Success();
         }
         catch (Exception ex)
@@ -233,6 +267,16 @@ public sealed partial class TerminalSessionService(
         await _activeSession.ResizeAsync(size, cancellationToken);
     }
 
+    public Task RespondToElevationPromptAsync(TerminalElevationResponse response)
+    {
+        TaskCompletionSource<TerminalElevationResponse>? completion;
+        lock (_stateGate)
+            completion = _elevationResponse;
+
+        completion?.TrySetResult(response);
+        return Task.CompletedTask;
+    }
+
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -253,7 +297,7 @@ public sealed partial class TerminalSessionService(
 
         _disposed = true;
         await DisconnectAsync();
-        _output.Writer.TryComplete();
+        CompleteSubscribers();
         _gate.Dispose();
         _commandGate.Dispose();
     }
@@ -280,7 +324,7 @@ public sealed partial class TerminalSessionService(
             await foreach (var output in backendOutput.Reader.ReadAllAsync(CancellationToken.None))
             {
                 await RecordOutputAsync(output, cancellationToken);
-                await _output.Writer.WriteAsync(output, CancellationToken.None);
+                PublishOutput(output);
             }
 
             await pumpTask;
@@ -337,16 +381,15 @@ public sealed partial class TerminalSessionService(
         int attempt,
         CancellationToken cancellationToken)
     {
-        var handler = _elevationPromptHandler;
         var session = _activeSession;
-        if (handler is null || session is null)
+        if (session is null)
         {
             execution.Completion.TrySetResult(execution.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
                 timedOut: false,
                 cancelled: true,
-                error: "The command requested a password, but no approval prompt is available."));
+                error: "The command requested a password, but no terminal session is available."));
             await InterruptCommandAsync(session);
             return;
         }
@@ -359,7 +402,7 @@ public sealed partial class TerminalSessionService(
                 execution.Command,
                 LastPromptLine(execution.VisibleOutput),
                 attempt);
-            var response = await handler(prompt, cancellationToken);
+            var response = await RequestElevationAsync(prompt, cancellationToken);
             if (response.Approved && !string.IsNullOrEmpty(response.Password))
             {
                 await session.SendAsync(response.Password + "\n", cancellationToken);
@@ -397,14 +440,50 @@ public sealed partial class TerminalSessionService(
         }
     }
 
+    private async Task<TerminalElevationResponse> RequestElevationAsync(
+        TerminalElevationPrompt prompt,
+        CancellationToken cancellationToken)
+    {
+        var completion = new TaskCompletionSource<TerminalElevationResponse>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (_stateGate)
+        {
+            PendingElevationPrompt = prompt;
+            _elevationResponse = completion;
+        }
+        NotifyStateChanged();
+
+        using var registration = cancellationToken.Register(() =>
+            completion.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null)));
+
+        var response = await completion.Task;
+
+        lock (_stateGate)
+        {
+            if (ReferenceEquals(_elevationResponse, completion))
+            {
+                PendingElevationPrompt = null;
+                _elevationResponse = null;
+            }
+        }
+        NotifyStateChanged();
+
+        return response;
+    }
+
     private async Task DisconnectCoreAsync(CancellationToken cancellationToken)
     {
         var session = _activeSession;
         if (session is null)
+        {
+            ClearPendingElevationPrompt();
             return;
+        }
 
         _activeSession = null;
         ActiveConnection = null;
+        ClearPendingElevationPrompt();
         lock (_historyGate)
         {
             _activeCommand?.Completion.TrySetResult(_activeCommand.BuildResult(
@@ -430,6 +509,7 @@ public sealed partial class TerminalSessionService(
         }
 
         await WriteUiOutputAsync(new TerminalOutput(TerminalOutputKind.Status, "Disconnected."), CancellationToken.None);
+        NotifyStateChanged();
     }
 
     private async Task MarkExitedAsync()
@@ -443,7 +523,9 @@ public sealed partial class TerminalSessionService(
             var session = _activeSession;
             _activeSession = null;
             ActiveConnection = null;
+            ClearPendingElevationPrompt();
             await session.DisposeAsync();
+            NotifyStateChanged();
         }
         finally
         {
@@ -454,7 +536,56 @@ public sealed partial class TerminalSessionService(
     private async Task WriteUiOutputAsync(TerminalOutput output, CancellationToken cancellationToken)
     {
         AppendRecentOutput(output);
-        await _output.Writer.WriteAsync(output, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        PublishOutput(output);
+        await Task.CompletedTask;
+    }
+
+    private void PublishOutput(TerminalOutput output)
+    {
+        List<Channel<TerminalOutput>> subscribers;
+        lock (_outputGate)
+        {
+            AppendReplayOutputLocked(output);
+            subscribers = _subscribers.ToList();
+        }
+
+        foreach (var subscriber in subscribers)
+            subscriber.Writer.TryWrite(output);
+    }
+
+    private void AppendReplayOutputLocked(TerminalOutput output)
+    {
+        _replayOutputs.Add(output);
+        _replayCharacterCount += ReplayCharacterCount(output);
+
+        var maxChars = EffectiveReplayOutputMaxChars();
+        while (_replayCharacterCount > maxChars && _replayOutputs.Count > 0)
+        {
+            _replayCharacterCount -= ReplayCharacterCount(_replayOutputs[0]);
+            _replayOutputs.RemoveAt(0);
+        }
+    }
+
+    private void CompleteSubscribers()
+    {
+        lock (_outputGate)
+        {
+            foreach (var subscriber in _subscribers)
+                subscriber.Writer.TryComplete();
+
+            _subscribers.Clear();
+        }
+    }
+
+    private void ClearPendingElevationPrompt()
+    {
+        lock (_stateGate)
+        {
+            PendingElevationPrompt = null;
+            _elevationResponse?.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null));
+            _elevationResponse = null;
+        }
     }
 
     private void AppendRecentOutput(TerminalOutput output)
@@ -760,6 +891,9 @@ public sealed partial class TerminalSessionService(
     private int EffectiveRecentOutputMaxChars() =>
         Math.Max(2_000, options.Value.TerminalRecentOutputMaxChars);
 
+    private int EffectiveReplayOutputMaxChars() =>
+        Math.Max(20_000, EffectiveRecentOutputMaxChars() * 2);
+
     private int EffectiveCommandOutputMaxChars() =>
         Math.Max(2_000, options.Value.TerminalCommandOutputMaxChars);
 
@@ -770,6 +904,28 @@ public sealed partial class TerminalSessionService(
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
+
+    private void NotifyStateChanged()
+    {
+        var handlers = StateChanged;
+        if (handlers is null)
+            return;
+
+        foreach (Action handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Terminal state subscriber failed.");
+            }
+        }
+    }
+
+    private static int ReplayCharacterCount(TerminalOutput output) =>
+        output.Text.Length + 32;
 
     private static string? FindOnPath(string executable)
     {

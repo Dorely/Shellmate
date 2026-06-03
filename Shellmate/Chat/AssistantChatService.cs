@@ -91,6 +91,7 @@ public sealed class AssistantChatService(
         await conversations.AddMessageAsync(userMessage, cancellationToken);
         conversation.UpdatedAt = DateTime.UtcNow;
         await conversations.SaveChangesAsync(cancellationToken);
+        yield return new AssistantUserMessagePersisted(userMessage.Id);
 
         IChatClient chat = null!;
         IList<AITool> aiTools = null!;

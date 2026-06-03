@@ -83,6 +83,18 @@ public sealed class ChatToolChip
             SetArguments(argumentsJson);
         ArgumentsComplete = true;
     }
+
+    public ChatToolChip Clone()
+    {
+        var clone = new ChatToolChip(CallId, Name, ArgumentsJson, ArgumentsComplete)
+        {
+            Result = Result,
+            Error = Error,
+            DurationMs = DurationMs,
+            Completed = Completed
+        };
+        return clone;
+    }
 }
 
 public sealed class ChatLiveTurn
@@ -149,6 +161,19 @@ public sealed class ChatLiveTurn
         _startNewMessageOnNextPart = true;
     }
 
+    public ChatLiveTurn Clone()
+    {
+        var clone = new ChatLiveTurn
+        {
+            IsThinking = IsThinking,
+            _startNewMessageOnNextPart = _startNewMessageOnNextPart
+        };
+        foreach (var message in Messages)
+            clone.Messages.Add(message.Clone());
+
+        return clone;
+    }
+
     private ChatToolChip? FindToolChip(string callId) => Messages
         .SelectMany(message => message.Parts)
         .OfType<ChatToolPart>()
@@ -193,6 +218,25 @@ public sealed class ChatLiveMessage
             textPart.Append(text);
         else
             Parts.Add(new ChatTextPart(text));
+    }
+
+    public ChatLiveMessage Clone()
+    {
+        var clone = new ChatLiveMessage();
+        foreach (var part in Parts)
+        {
+            switch (part)
+            {
+                case ChatTextPart textPart:
+                    clone.Parts.Add(new ChatTextPart(textPart.Text.ToString()));
+                    break;
+                case ChatToolPart toolPart:
+                    clone.Parts.Add(new ChatToolPart(toolPart.Chip.Clone()));
+                    break;
+            }
+        }
+
+        return clone;
     }
 }
 

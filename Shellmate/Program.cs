@@ -41,7 +41,7 @@ builder.Services.AddScoped<IAssistantConversationRepository, AssistantConversati
 builder.Services.AddScoped<ITerminalConnectionRepository, TerminalConnectionRepository>();
 builder.Services.AddScoped<IConnectionNoteRepository, ConnectionNoteRepository>();
 builder.Services.AddScoped<ISecretStore, SqliteSecretStore>();
-builder.Services.AddScoped<IWorkspaceConnectionContext, WorkspaceConnectionContext>();
+builder.Services.AddSingleton<IWorkspaceConnectionContext, WorkspaceConnectionContext>();
 builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentOptions.SectionName));
 builder.Services.Configure<TokenCountingOptions>(builder.Configuration.GetSection(TokenCountingOptions.SectionName));
 builder.Services.AddSingleton<TiktokenTokenCounter>();
@@ -55,8 +55,9 @@ builder.Services.AddScoped<AssistantNoteTools>();
 builder.Services.AddScoped<AssistantToolRegistry>();
 builder.Services.AddScoped<IConnectionNoteService, ConnectionNoteService>();
 builder.Services.AddScoped<IAssistantChatService, AssistantChatService>();
+builder.Services.AddSingleton<IWorkspaceChatRuntime, WorkspaceChatRuntime>();
 builder.Services.AddScoped<ITerminalConnectionService, TerminalConnectionService>();
-builder.Services.AddScoped<ITerminalSessionService, TerminalSessionService>();
+builder.Services.AddSingleton<ITerminalSessionService, TerminalSessionService>();
 
 var app = builder.Build();
 
