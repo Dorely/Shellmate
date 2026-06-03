@@ -64,6 +64,16 @@ namespace Shellmate.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ToolCallId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ToolCallsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ToolName")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ConversationId", "Order");
@@ -235,6 +245,10 @@ namespace Shellmate.Persistence.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SshAuthType")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ShellKind")
                         .IsRequired()
                         .HasColumnType("TEXT");
 

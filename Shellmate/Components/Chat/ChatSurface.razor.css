@@ -156,6 +156,85 @@
     color: #667085;
 }
 
+.chat-tool-group {
+    margin: 0.35rem 0;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    background: #ffffff;
+    overflow: hidden;
+}
+
+.chat-tool-group > summary {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.55rem 0.65rem;
+    cursor: pointer;
+    list-style: none;
+}
+
+.chat-tool-group > summary::-webkit-details-marker {
+    display: none;
+}
+
+.chat-tool-group-icon {
+    min-width: 2rem;
+    padding: 0.08rem 0.35rem;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: #334155;
+    font-size: 0.72rem;
+    text-align: center;
+    text-transform: uppercase;
+}
+
+.chat-tool-group-title {
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.chat-tool-group-names,
+.chat-tool-group-duration {
+    min-width: 0;
+    color: #667085;
+    font-size: 0.78rem;
+}
+
+.chat-tool-group-names {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-tool-group-duration {
+    white-space: nowrap;
+}
+
+.chat-tool-group-body {
+    border-top: 1px solid #e5e7eb;
+    padding: 0.45rem 0.65rem 0.65rem;
+}
+
+.chat-tool-group-body ::deep .chat-chip {
+    margin: 0.45rem 0 0;
+}
+
+.chat-tool-group-running .chat-tool-group-icon {
+    background: #e0f2fe;
+    color: #075985;
+}
+
+.chat-tool-group-ok .chat-tool-group-icon {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.chat-tool-group-error .chat-tool-group-icon {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
 @keyframes blink {
     to {
         opacity: 0;

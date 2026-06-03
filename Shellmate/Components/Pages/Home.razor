@@ -106,6 +106,27 @@ else
                              OnResize="ResizeTerminalAsync" />
         </section>
     </div>
+
+    @if (_elevationPrompt is not null)
+    {
+        <div class="elevation-backdrop" role="presentation">
+            <div class="elevation-dialog" role="dialog" aria-modal="true" aria-labelledby="elevation-title">
+                <div id="elevation-title" class="elevation-title">Terminal Password Required</div>
+                <div class="elevation-meta">@ElevationPromptMeta</div>
+                <div class="elevation-command">@_elevationPrompt.Command</div>
+                <label class="elevation-prompt" for="elevation-password">@_elevationPrompt.PromptText</label>
+                <input id="elevation-password"
+                       class="form-control"
+                       type="password"
+                       autocomplete="current-password"
+                       @bind="_elevationPassword" />
+                <div class="elevation-actions">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="DenyElevationPrompt">Deny</button>
+                    <button type="button" class="btn btn-sm btn-primary" @onclick="ApproveElevationPrompt">Send Once</button>
+                </div>
+            </div>
+        </div>
+    }
 }
 
 @code {
@@ -117,8 +138,11 @@ else
     private TerminalSurface? _terminal;
     private TerminalSize _terminalSize = TerminalSize.Default;
     private TerminalHostKeyPrompt? _hostKeyPrompt;
+    private TerminalElevationPrompt? _elevationPrompt;
+    private TaskCompletionSource<TerminalElevationResponse>? _elevationResponse;
     private Guid? _selectedConnectionId;
     private string _input = string.Empty;
+    private string _elevationPassword = string.Empty;
     private string? _error;
     private string? _terminalError;
     private string _providerSubtitle = "Checking provider status...";
@@ -136,6 +160,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
+        TerminalSession.SetElevationPromptHandler(RequestElevationAsync);
         await ReloadAsync();
         StartTerminalOutputPump();
     }
@@ -147,8 +172,8 @@ else
         _connections.Clear();
 
         var conversation = await ChatService.GetOrCreateAsync();
-        var messages = await ChatService.LoadMessagesAsync(conversation.Id);
-        _messages.AddRange(messages.Select(ToRenderable));
+        var persistedMessages = await ChatService.LoadMessagesAsync(conversation.Id);
+        _messages.AddRange(ToRenderable(persistedMessages));
         _connections.AddRange(await ConnectionService.ListAsync());
         if (_connections.Count == 0)
         {
@@ -251,6 +276,18 @@ else
                 {
                     case AssistantTextDelta delta:
                         _live.AppendText(delta.Text);
+                        _scrollKey++;
+                        break;
+                    case AssistantToolCallStarted started:
+                        _live.StartToolCall(started.CallId, started.ToolName, started.ArgumentsJson, started.ArgumentsComplete);
+                        _scrollKey++;
+                        break;
+                    case AssistantToolCallArgumentsDelta delta:
+                        _live.AppendToolArguments(delta.CallId, delta.ArgumentsDelta, delta.ArgumentsComplete);
+                        _scrollKey++;
+                        break;
+                    case AssistantToolCallCompleted completed:
+                        _live.CompleteToolCall(completed.CallId, completed.Result, completed.Error, completed.DurationMs);
                         _scrollKey++;
                         break;
                     case AssistantTurnError turnError:
@@ -366,28 +403,149 @@ else
         _terminalError = null;
     }
 
-    private static ChatRenderableMessage ToRenderable(AssistantMessage message)
-    {
-        var role = message.Role == AssistantMessageRole.User
-            ? ChatMessageRole.User
-            : ChatMessageRole.Assistant;
-        var status = message.Status switch
-        {
-            AssistantMessageStatus.Failed => ChatMessageStatus.Failed,
-            AssistantMessageStatus.Cancelled => ChatMessageStatus.Cancelled,
-            AssistantMessageStatus.Pending => ChatMessageStatus.Pending,
-            _ => ChatMessageStatus.Completed
-        };
+    private string ElevationPromptMeta => _elevationPrompt is null
+        ? string.Empty
+        : _elevationPrompt.Attempt <= 1
+            ? $"{_elevationPrompt.ConnectionName} is requesting a password for this command."
+            : $"{_elevationPrompt.ConnectionName} is requesting a password for this command. Attempt {_elevationPrompt.Attempt}.";
 
-        return new ChatRenderableMessage(
-            message.Id,
-            role,
-            status,
-            string.IsNullOrEmpty(message.Content) ? [] : [new ChatTextPart(message.Content)]);
+    private async Task<TerminalElevationResponse> RequestElevationAsync(
+        TerminalElevationPrompt prompt,
+        CancellationToken cancellationToken)
+    {
+        var completion = new TaskCompletionSource<TerminalElevationResponse>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(() =>
+            completion.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null)));
+
+        await InvokeAsync(() =>
+        {
+            _elevationPrompt = prompt;
+            _elevationPassword = string.Empty;
+            _elevationResponse = completion;
+            StateHasChanged();
+        });
+
+        var response = await completion.Task;
+        await InvokeAsync(() =>
+        {
+            if (ReferenceEquals(_elevationResponse, completion))
+            {
+                _elevationPrompt = null;
+                _elevationResponse = null;
+                _elevationPassword = string.Empty;
+            }
+
+            StateHasChanged();
+        });
+
+        return response;
+    }
+
+    private void ApproveElevationPrompt()
+    {
+        _elevationResponse?.TrySetResult(new TerminalElevationResponse(
+            Approved: true,
+            Password: _elevationPassword));
+    }
+
+    private void DenyElevationPrompt()
+    {
+        _elevationResponse?.TrySetResult(new TerminalElevationResponse(
+            Approved: false,
+            Password: null));
+    }
+
+    private static List<ChatRenderableMessage> ToRenderable(IReadOnlyList<AssistantMessage> messages)
+    {
+        var toolRowsByCallId = messages
+            .Where(message => message.Role == AssistantMessageRole.Tool && !string.IsNullOrWhiteSpace(message.ToolCallId))
+            .GroupBy(message => message.ToolCallId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+
+        var renderable = new List<ChatRenderableMessage>(messages.Count);
+        foreach (var message in messages)
+        {
+            if (message.Role is AssistantMessageRole.System or AssistantMessageRole.Tool)
+                continue;
+
+            renderable.Add(new ChatRenderableMessage(
+                message.Id,
+                ToChatRole(message.Role),
+                ToChatStatus(message.Status),
+                BuildMessageParts(message, toolRowsByCallId)));
+        }
+
+        return renderable;
+    }
+
+    private static ChatMessageRole ToChatRole(AssistantMessageRole role) =>
+        role == AssistantMessageRole.User ? ChatMessageRole.User : ChatMessageRole.Assistant;
+
+    private static ChatMessageStatus ToChatStatus(AssistantMessageStatus status) => status switch
+    {
+        AssistantMessageStatus.Failed => ChatMessageStatus.Failed,
+        AssistantMessageStatus.Cancelled => ChatMessageStatus.Cancelled,
+        AssistantMessageStatus.Pending => ChatMessageStatus.Pending,
+        _ => ChatMessageStatus.Completed
+    };
+
+    private static List<ChatMessagePart> BuildMessageParts(
+        AssistantMessage message,
+        IReadOnlyDictionary<string, AssistantMessage> toolRowsByCallId)
+    {
+        if (message.Role != AssistantMessageRole.Assistant)
+            return string.IsNullOrEmpty(message.Content) ? [] : [new ChatTextPart(message.Content)];
+
+        var calls = ChatTranscriptHelpers.ReadPersistedCalls(message.ToolCallsJson);
+        if (calls.Count == 0)
+            return string.IsNullOrEmpty(message.Content) ? [] : [new ChatTextPart(message.Content)];
+
+        var parts = new List<ChatMessagePart>();
+        var text = message.Content ?? string.Empty;
+        var cursor = 0;
+        foreach (var call in calls.OrderBy(call => call.TextOffset ?? int.MaxValue))
+        {
+            var offset = Math.Clamp(call.TextOffset ?? text.Length, 0, text.Length);
+            if (offset > cursor)
+                parts.Add(new ChatTextPart(text[cursor..offset]));
+
+            parts.Add(new ChatToolPart(BuildToolChip(call, toolRowsByCallId)));
+            cursor = Math.Max(cursor, offset);
+        }
+
+        if (cursor < text.Length)
+            parts.Add(new ChatTextPart(text[cursor..]));
+
+        return parts;
+    }
+
+    private static ChatToolChip BuildToolChip(
+        ChatPersistedToolCall call,
+        IReadOnlyDictionary<string, AssistantMessage> toolRowsByCallId)
+    {
+        var chip = new ChatToolChip(call.CallId, call.Name, call.ArgumentsJson, argumentsComplete: true);
+        if (!toolRowsByCallId.TryGetValue(call.CallId, out var toolRow))
+            return chip;
+
+        chip.Completed = toolRow.Status != AssistantMessageStatus.Pending;
+        if (toolRow.Status == AssistantMessageStatus.Failed)
+        {
+            chip.Error = string.IsNullOrWhiteSpace(toolRow.ErrorMessage)
+                ? "Tool call failed."
+                : toolRow.ErrorMessage;
+        }
+        else
+        {
+            chip.Result = toolRow.Content;
+        }
+
+        return chip;
     }
 
     public async ValueTask DisposeAsync()
     {
+        TerminalSession.SetElevationPromptHandler(null);
         _turnCts?.Cancel();
         _turnCts?.Dispose();
         _outputCts?.Cancel();

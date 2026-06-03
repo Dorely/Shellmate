@@ -195,8 +195,33 @@
 
     private RenderFragment RenderParts(IReadOnlyList<ChatMessagePart> parts, ChatTextPart? trailingText = null) => __builder =>
     {
-        foreach (var part in parts)
-            @RenderPart(part, ReferenceEquals(part, trailingText))
+        var index = 0;
+        while (index < parts.Count)
+        {
+            if (parts[index] is not ChatToolPart firstTool)
+            {
+                @RenderPart(parts[index], ReferenceEquals(parts[index], trailingText))
+                index++;
+                continue;
+            }
+
+            var toolParts = new List<ChatToolChip> { firstTool.Chip };
+            index++;
+            while (index < parts.Count && parts[index] is ChatToolPart nextTool)
+            {
+                toolParts.Add(nextTool.Chip);
+                index++;
+            }
+
+            if (toolParts.Count == 1)
+            {
+                <ChatToolChipView Chip="toolParts[0]" />
+            }
+            else
+            {
+                @RenderToolGroup(toolParts)
+            }
+        }
     };
 
     private RenderFragment RenderPart(ChatMessagePart part, bool showCursor = false) => __builder =>
@@ -209,7 +234,76 @@
                 <div class="chat-msg-text">@text@if (showCursor) { <span class="chat-cursor">|</span> }</div>
             }
         }
+        else if (part is ChatToolPart toolPart)
+        {
+            <ChatToolChipView Chip="toolPart.Chip" />
+        }
     };
+
+    private RenderFragment RenderToolGroup(IReadOnlyList<ChatToolChip> chips) => __builder =>
+    {
+        var duration = chips
+            .Where(chip => chip.DurationMs.HasValue)
+            .Sum(chip => chip.DurationMs!.Value);
+        var hasDuration = duration > 0;
+        var stateClass = chips.Any(chip => chip.Error is not null)
+            ? "chat-tool-group-error"
+            : chips.All(chip => chip.Completed)
+                ? "chat-tool-group-ok"
+                : "chat-tool-group-running";
+
+        <details class="chat-tool-group @stateClass" open="@ToolGroupOpen(chips)">
+            <summary>
+                <span class="chat-tool-group-icon">@ToolGroupIcon(chips)</span>
+                <span class="chat-tool-group-title">@chips.Count tool calls</span>
+                <span class="chat-tool-group-names">@ToolGroupNames(chips)</span>
+                @if (hasDuration)
+                {
+                    <span class="chat-tool-group-duration">@FormatDuration(duration)</span>
+                }
+                else if (chips.Any(chip => !chip.Completed))
+                {
+                    <span class="chat-tool-group-duration">running</span>
+                }
+            </summary>
+            <div class="chat-tool-group-body">
+                @foreach (var chip in chips)
+                {
+                    <ChatToolChipView Chip="chip" />
+                }
+            </div>
+        </details>
+    };
+
+    private static string ToolGroupIcon(IReadOnlyList<ChatToolChip> chips)
+    {
+        if (chips.Any(chip => chip.Error is not null)) return "x";
+        if (chips.All(chip => chip.Completed)) return "ok";
+        return "run";
+    }
+
+    private static bool ToolGroupOpen(IReadOnlyList<ChatToolChip> chips) =>
+        chips.Any(chip => !chip.Completed);
+
+    private static string ToolGroupNames(IReadOnlyList<ChatToolChip> chips)
+    {
+        var names = chips
+            .Select(chip => chip.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.Ordinal)
+            .Take(3)
+            .ToList();
+        if (names.Count == 0) return "tool calls";
+
+        var label = string.Join(", ", names);
+        var remaining = chips.Select(chip => chip.Name).Distinct(StringComparer.Ordinal).Count() - names.Count;
+        return remaining > 0 ? $"{label} +{remaining}" : label;
+    }
+
+    private static string FormatDuration(double durationMs) =>
+        durationMs >= 1000
+            ? $"{durationMs / 1000:0.0}s"
+            : $"{durationMs:0}ms";
 
     public async ValueTask DisposeAsync()
     {

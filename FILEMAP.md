@@ -25,8 +25,8 @@
 | File | Description |
 |------|-------------|
 | `Shellmate.csproj` | `net10.0` Blazor Web project with Electron.NET, EF Core SQLite, Microsoft.Extensions.AI, OpenAI SDK, SSH.NET, Quick.PtyNet, runtime IDs, and warnings-as-errors. |
-| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, and routing. |
-| `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, and agent timeouts. |
+| `Program.cs` | App host setup: Electron mode detection/window launch, Blazor Interactive Server, DI wiring, EF migrations, OAuth endpoints, shell tools, and routing. |
+| `appsettings.json` / `appsettings.Development.json` | Configuration for logging, desktop binding, Codex OAuth redirect URI, SQLite connection string, Blazor hub size, and agent/tool/terminal limits. |
 | `Properties/launchSettings.json` | Local launch profiles for browser-hosted HTTP and Electron desktop mode on `localhost:1455`. |
 | `Properties/electron-builder.json` | Electron/electron-builder packaging metadata for Windows, Linux, and macOS targets. |
 
@@ -40,8 +40,10 @@
 
 | File | Description |
 |------|-------------|
-| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent global assistant chat service with default-provider resolution, streaming responses, cancellation, reset, and transcript persistence. |
-| `AssistantTurnUpdate.cs` | Streaming update records consumed by the chat page: text deltas, completion, and turn errors. |
+| `IAssistantChatService.cs` / `AssistantChatService.cs` | Persistent global assistant chat service with provider resolution, manual tool-call loop, shell tool invocation, cancellation, reset, and transcript persistence. |
+| `AssistantPromptBuilder.cs` | Builds the app-owned assistant system prompt with tool-use rules and dynamic terminal context. |
+| `AssistantShellTools.cs` | Defines shell inspection and command-execution tools over the currently connected terminal session. |
+| `AssistantTurnUpdate.cs` | Streaming update records consumed by the chat page: text deltas, tool-call events, completion, and turn errors. |
 
 ### Components/
 
@@ -55,8 +57,9 @@
 
 | File | Description |
 |------|-------------|
-| `ChatModels.cs` | UI-only chat transcript/live-turn models used by `ChatSurface`. |
-| `ChatSurface.razor` / `.razor.css` / `.razor.js` | Reusable chat shell for transcript rendering, streaming state, composer autosize, enter-to-send, and scroll-follow behavior. |
+| `ChatModels.cs` | UI-only chat transcript/live-turn models, message parts, persisted tool-call helpers, and tool-chip state used by `ChatSurface`. |
+| `ChatSurface.razor` / `.razor.css` / `.razor.js` | Reusable chat shell for text/tool transcript rendering, streaming state, composer autosize, enter-to-send, and scroll-follow behavior. |
+| `ChatToolChipView.razor` / `.razor.css` | Expandable generic tool-call chip used for live and persisted shell tool calls. |
 
 ### Components/Terminal/
 
@@ -76,11 +79,11 @@
 
 | File | Description |
 |------|-------------|
-| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat in the left pane and a selectable terminal session in the right pane. |
+| `Home.razor` / `.razor.css` | Workspace route at `/` and `/chat`; shows chat, terminal session, live tool chips, and terminal password approval modal. |
 | `NotFound.razor` | 404 page wired through status-code re-execution. |
 | `Error.razor` | Error page rendered by exception handler middleware. |
 | `Settings/Providers.razor` / `.razor.css` | Provider settings page for OpenAI account OAuth, OpenAI-compatible endpoints, model tests, defaults, API-key updates, and child model rows. |
-| `Settings/Connections.razor` / `.razor.css` | Connection settings page for creating, editing, and deleting SSH and local shell terminal profiles. |
+| `Settings/Connections.razor` / `.razor.css` | Connection settings page for creating, editing, and deleting SSH/local shell terminal profiles, including shell-kind hints. |
 
 ### Connections/
 
@@ -88,31 +91,34 @@
 |------|-------------|
 | `ConnectionSecretNames.cs` | Centralized secret key names for SSH passwords and private-key passphrases. |
 | `ITerminalConnectionService.cs` / `TerminalConnectionService.cs` | Connection profile CRUD, validation, credential secret handling, and SSH host-key trust updates. |
-| `TerminalConnectionModels.cs` | Service DTOs for connection drafts, secret status, and trusted SSH host-key metadata. |
+| `TerminalConnectionModels.cs` | Service DTOs for connection drafts, shell-kind hints, secret status, and trusted SSH host-key metadata. |
 
 ### Llm/
 
 | File | Description |
 |------|-------------|
-| `AgentOptions.cs` | Configurable agent/chat options currently used for Codex request timeout. |
+| `AgentOptions.cs` | Configurable agent/chat options for Codex request timeout, tool iterations, and terminal context/result limits. |
 | `ChatClientFactory.cs` / `IChatClientFactory.cs` | Creates and tests Microsoft.Extensions.AI chat clients from persisted providers and effective credentials. |
 | `CodexAuthService.cs` / `ICodexAuthService.cs` | OpenAI account OAuth PKCE flow, token refresh, revocation, and token secret persistence. |
-| `CodexChatClient.cs` | Minimal `IChatClient` bridge to the Codex Responses SSE endpoint for account OAuth chat. |
+| `CodexChatClient.cs` | Tool-aware `IChatClient` bridge to the Codex Responses SSE endpoint for account OAuth chat. |
 | `CodexProvider.cs` | Constants and helpers for the OpenAI account provider and JWT account-id extraction. |
 | `LlmProviderService.cs` / `ILlmProviderService.cs` | Provider CRUD, readiness snapshots, credential status, default-provider selection, and effective API-key/token resolution. |
 | `SecretNames.cs` | Centralized secret key names for provider API keys and OAuth tokens. |
+| `StreamingToolCallTracker.cs` | Tracks streamed tool-call start, argument deltas, and ready function-call content. |
+| `ToolCallArguments.cs` | Helpers for preserving and parsing raw tool-call JSON arguments for manual invocation. |
+| `ToolCallStreamingContent.cs` | Custom streaming AI content records for function-call start and argument-delta events. |
 
 ### Models/
 
 | File | Description |
 |------|-------------|
 | `AssistantConversation.cs` | EF entity for the single persistent assistant conversation. |
-| `AssistantMessage.cs` | EF entity and enums for transcript messages, roles, statuses, and errors. |
+| `AssistantMessage.cs` | EF entity and enums for transcript messages, tool-call manifests/results, roles, statuses, and errors. |
 | `AuthType.cs` | Enum for provider authentication modes: none, API key, or OAuth. |
 | `LlmProvider.cs` | EF entity for chat endpoint/model rows, default selection, child model credential inheritance, and readiness snapshots. |
 | `OAuthToken.cs` | EF entity for OAuth token metadata; token values are stored through `ISecretStore`. |
 | `StoredSecret.cs` | EF entity backing the first SQLite implementation of `ISecretStore`. |
-| `TerminalConnection.cs` | EF entity and enums for SSH and local shell terminal connection profiles. |
+| `TerminalConnection.cs` | EF entity and enums for SSH/local shell terminal profiles, connection kind, auth type, and shell-kind hints. |
 
 ### Persistence/
 
@@ -129,6 +135,7 @@
 |------|-------------|
 | `20260602000000_InitialSchema.cs` | EF baseline migration for the schema that existed before migration adoption. |
 | `20260602001000_AddTerminalConnections.cs` | EF migration adding terminal connection profile storage. |
+| `20260603000000_AddAssistantToolCallsAndShellKind.cs` | EF migration adding assistant tool transcript columns and terminal shell-kind hints. |
 | `AppDbContextModelSnapshot.cs` | EF model snapshot for the current migrated schema. |
 
 ### Persistence/Repositories/
@@ -145,10 +152,10 @@
 | File | Description |
 |------|-------------|
 | `ITerminalBackendSession.cs` | Common backend interface for local PTY and SSH terminal sessions. |
-| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | Per-circuit terminal coordinator for connect, input, output, resize, disconnect, and session cleanup. |
+| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | Per-circuit terminal coordinator for connect, input/output teeing, snapshots, serialized command execution, elevation prompts, resize, and cleanup. |
 | `LocalTerminalSession.cs` | Quick.PtyNet-backed local shell session with platform shell defaults and PTY cleanup. |
 | `SshTerminalSession.cs` | SSH.NET-backed shell session with password/private-key auth, `xterm-256color`, resize, and host-key trust checks. |
-| `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, connect results, and resolved SSH credentials. |
+| `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, snapshots, command records/results, elevation prompts, connect results, and resolved SSH credentials. |
 
 ### Secrets/
 

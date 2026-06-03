@@ -42,6 +42,7 @@ public sealed class TerminalConnectionService(
             LocalShellPath = normalized.LocalShellPath,
             LocalShellArguments = normalized.LocalShellArguments,
             LocalWorkingDirectory = normalized.LocalWorkingDirectory,
+            ShellKind = normalized.ShellKind,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -71,6 +72,7 @@ public sealed class TerminalConnectionService(
         connection.LocalShellPath = normalized.LocalShellPath;
         connection.LocalShellArguments = normalized.LocalShellArguments;
         connection.LocalWorkingDirectory = normalized.LocalWorkingDirectory;
+        connection.ShellKind = normalized.ShellKind;
         connection.UpdatedAt = DateTime.UtcNow;
 
         if (normalized.ClearTrustedHostKey || connection.Kind != TerminalConnectionKind.Ssh)
@@ -151,6 +153,7 @@ public sealed class TerminalConnectionService(
             LocalShellPath = localShellPath,
             LocalShellArguments = localShellArguments,
             LocalWorkingDirectory = localWorkingDirectory,
+            ShellKind = draft.ShellKind,
             Password = TrimToNull(draft.Password),
             PrivateKeyPassphrase = TrimToNull(draft.PrivateKeyPassphrase)
         };

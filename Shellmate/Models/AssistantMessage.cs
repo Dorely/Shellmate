@@ -7,6 +7,9 @@ public class AssistantMessage
     public int Order { get; set; }
     public AssistantMessageRole Role { get; set; }
     public string Content { get; set; } = string.Empty;
+    public string ToolCallsJson { get; set; } = "[]";
+    public string? ToolCallId { get; set; }
+    public string? ToolName { get; set; }
     public AssistantMessageStatus Status { get; set; }
     public string? ErrorMessage { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -18,7 +21,8 @@ public enum AssistantMessageRole
 {
     System,
     User,
-    Assistant
+    Assistant,
+    Tool
 }
 
 public enum AssistantMessageStatus

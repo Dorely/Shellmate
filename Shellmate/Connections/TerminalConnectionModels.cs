@@ -13,6 +13,7 @@ public sealed record TerminalConnectionDraft(
     string? LocalShellPath,
     string? LocalShellArguments,
     string? LocalWorkingDirectory,
+    TerminalShellKind ShellKind,
     string? Password,
     bool ClearPassword,
     string? PrivateKeyPassphrase,

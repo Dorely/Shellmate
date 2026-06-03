@@ -105,6 +105,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options, ILogger<AppDbC
             entity.HasIndex(e => e.Name).IsUnique();
             entity.Property(e => e.Kind).HasConversion<string>();
             entity.Property(e => e.SshAuthType).HasConversion<string>();
+            entity.Property(e => e.ShellKind).HasConversion<string>();
         });
     }
 }

@@ -101,6 +101,15 @@
                             <option value="@TerminalConnectionKind.Ssh">SSH</option>
                         </InputSelect>
                     </div>
+                    <div>
+                        <label class="form-label form-label-sm">Shell kind</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="_draft.ShellKind">
+                            <option value="@TerminalShellKind.Auto">Auto</option>
+                            <option value="@TerminalShellKind.Posix">POSIX/bash/sh</option>
+                            <option value="@TerminalShellKind.PowerShell">PowerShell</option>
+                            <option value="@TerminalShellKind.Cmd">cmd.exe</option>
+                        </InputSelect>
+                    </div>
 
                     @if (_draft.Kind == TerminalConnectionKind.Ssh)
                     {
@@ -354,6 +363,7 @@
         public string? LocalShellPath { get; set; }
         public string? LocalShellArguments { get; set; }
         public string? LocalWorkingDirectory { get; set; }
+        public TerminalShellKind ShellKind { get; set; } = TerminalShellKind.Auto;
         public string? Password { get; set; }
         public bool ClearPassword { get; set; }
         public string? PrivateKeyPassphrase { get; set; }
@@ -365,6 +375,7 @@
             {
                 Name = "Local Shell",
                 Kind = TerminalConnectionKind.LocalShell,
+                ShellKind = TerminalShellKind.Auto,
                 LocalWorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
             };
 
@@ -380,7 +391,8 @@
                 PrivateKeyPath = connection.PrivateKeyPath,
                 LocalShellPath = connection.LocalShellPath,
                 LocalShellArguments = connection.LocalShellArguments,
-                LocalWorkingDirectory = connection.LocalWorkingDirectory
+                LocalWorkingDirectory = connection.LocalWorkingDirectory,
+                ShellKind = connection.ShellKind
             };
 
         public TerminalConnectionDraft ToServiceDraft() =>
@@ -395,6 +407,7 @@
                 LocalShellPath,
                 LocalShellArguments,
                 LocalWorkingDirectory,
+                ShellKind,
                 Password,
                 ClearPassword,
                 PrivateKeyPassphrase,

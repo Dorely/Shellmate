@@ -16,6 +16,7 @@ public class TerminalConnection
     public string? LocalShellPath { get; set; }
     public string? LocalShellArguments { get; set; }
     public string? LocalWorkingDirectory { get; set; }
+    public TerminalShellKind ShellKind { get; set; } = TerminalShellKind.Auto;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
@@ -30,4 +31,12 @@ public enum SshAuthenticationType
 {
     Password,
     PrivateKeyPath
+}
+
+public enum TerminalShellKind
+{
+    Auto,
+    Posix,
+    PowerShell,
+    Cmd
 }

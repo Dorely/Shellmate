@@ -1,0 +1,63 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Options;
+using Shellmate.Llm;
+using Shellmate.Terminal;
+
+namespace Shellmate.Chat;
+
+public sealed record AssistantShellToolContext(
+    ITerminalSessionService Terminal,
+    CancellationToken CancellationToken);
+
+public sealed class AssistantShellTools(IOptions<AgentOptions> options)
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    public IList<AITool> Build(AssistantShellToolContext context)
+    {
+        return new List<AITool>
+        {
+            AIFunctionFactory.Create(
+                method: () => ReadTerminalState(context),
+                name: "read_terminal_state",
+                description: "Read the currently connected terminal state as JSON, including connection name/type, shell kind, recent commands, and bounded recent output. This cannot connect or disconnect terminals."),
+
+            AIFunctionFactory.Create(
+                method: (string command, int? timeoutSeconds = null) => RunShellCommandAsync(context, command, timeoutSeconds),
+                name: "run_shell_command",
+                description: "Execute one command in the currently connected terminal shell and return bounded JSON output. The tool cannot connect to a terminal. Use timeoutSeconds only when the command is expected to take longer than the default."),
+        };
+    }
+
+    private static string ReadTerminalState(AssistantShellToolContext context)
+    {
+        var snapshot = context.Terminal.GetSnapshot();
+        return JsonSerializer.Serialize(snapshot, JsonOptions);
+    }
+
+    private async Task<string> RunShellCommandAsync(
+        AssistantShellToolContext context,
+        string command,
+        int? timeoutSeconds)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+            return "Error: command is required.";
+
+        var effectiveTimeout = Math.Clamp(
+            timeoutSeconds ?? options.Value.TerminalCommandTimeoutSeconds,
+            1,
+            600);
+        var result = await context.Terminal.ExecuteCommandAsync(
+            command,
+            TimeSpan.FromSeconds(effectiveTimeout),
+            context.CancellationToken);
+
+        return JsonSerializer.Serialize(result, JsonOptions);
+    }
+}

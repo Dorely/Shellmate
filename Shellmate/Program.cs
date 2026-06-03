@@ -42,6 +42,7 @@ builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection(AgentO
 builder.Services.AddScoped<ILlmProviderService, LlmProviderService>();
 builder.Services.AddScoped<ICodexAuthService, CodexAuthService>();
 builder.Services.AddScoped<IChatClientFactory, ChatClientFactory>();
+builder.Services.AddScoped<AssistantShellTools>();
 builder.Services.AddScoped<IAssistantChatService, AssistantChatService>();
 builder.Services.AddScoped<ITerminalConnectionService, TerminalConnectionService>();
 builder.Services.AddScoped<ITerminalSessionService, TerminalSessionService>();
