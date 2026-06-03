@@ -116,10 +116,13 @@ else
                 <div class="elevation-command">@_elevationPrompt.Command</div>
                 <label class="elevation-prompt" for="elevation-password">@_elevationPrompt.PromptText</label>
                 <input id="elevation-password"
+                       @ref="_elevationPasswordInput"
                        class="form-control"
                        type="password"
                        autocomplete="current-password"
-                       @bind="_elevationPassword" />
+                       @bind="_elevationPassword"
+                       @bind:event="oninput"
+                       @onkeydown="OnElevationPasswordKeyDown" />
                 <div class="elevation-actions">
                     <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="DenyElevationPrompt">Deny</button>
                     <button type="button" class="btn btn-sm btn-primary" @onclick="ApproveElevationPrompt">Send Once</button>
@@ -140,6 +143,8 @@ else
     private TerminalHostKeyPrompt? _hostKeyPrompt;
     private TerminalElevationPrompt? _elevationPrompt;
     private TaskCompletionSource<TerminalElevationResponse>? _elevationResponse;
+    private ElementReference _elevationPasswordInput;
+    private Guid? _focusedElevationPromptId;
     private Guid? _selectedConnectionId;
     private string _input = string.Empty;
     private string _elevationPassword = string.Empty;
@@ -163,6 +168,21 @@ else
         TerminalSession.SetElevationPromptHandler(RequestElevationAsync);
         await ReloadAsync();
         StartTerminalOutputPump();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_elevationPrompt is null || _focusedElevationPromptId == _elevationPrompt.Id)
+            return;
+
+        _focusedElevationPromptId = _elevationPrompt.Id;
+        try
+        {
+            await _elevationPasswordInput.FocusAsync();
+        }
+        catch
+        {
+        }
     }
 
     private async Task ReloadAsync()
@@ -454,6 +474,12 @@ else
         _elevationResponse?.TrySetResult(new TerminalElevationResponse(
             Approved: false,
             Password: null));
+    }
+
+    private void OnElevationPasswordKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+            ApproveElevationPrompt();
     }
 
     private static List<ChatRenderableMessage> ToRenderable(IReadOnlyList<AssistantMessage> messages)
