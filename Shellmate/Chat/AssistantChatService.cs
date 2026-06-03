@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Shellmate.Connections;
 using Shellmate.Llm;
 using Shellmate.Models;
+using Shellmate.Notes;
 using Shellmate.Persistence.Repositories;
 using Shellmate.Terminal;
 
@@ -18,6 +19,8 @@ public sealed class AssistantChatService(
     IChatClientFactory chatClientFactory,
     ITerminalSessionService terminal,
     IWorkspaceConnectionContext workspace,
+    IConnectionNoteService noteService,
+    ITerminalConnectionRepository terminalConnections,
     AssistantToolRegistry toolRegistry,
     IOptions<AgentOptions> options,
     ILogger<AssistantChatService> logger) : IAssistantChatService
@@ -97,7 +100,8 @@ public sealed class AssistantChatService(
         {
             chat = await chatClientFactory.CreateChatClientAsync(providerAvailability.Provider.Id, cancellationToken);
             aiTools = toolRegistry.Build(new AssistantToolContext(terminal, workspace, cancellationToken));
-            systemPrompt = AssistantPromptBuilder.Build(terminal.GetSnapshot());
+            var noteContext = await BuildNoteContextAsync(cancellationToken);
+            systemPrompt = AssistantPromptBuilder.Build(terminal.GetSnapshot(), noteContext);
         }
         catch (Exception ex)
         {
@@ -350,7 +354,7 @@ public sealed class AssistantChatService(
                 yield return new AssistantToolCallCompleted(
                     pendingCall.CallId,
                     pendingCall.Name,
-                    toolError is null ? toolResult : null,
+                    toolResult,
                     toolError,
                     stopwatch.Elapsed.TotalMilliseconds);
 
@@ -370,6 +374,27 @@ public sealed class AssistantChatService(
                     Cancelled: false);
                 yield break;
             }
+        }
+    }
+
+    private async Task<AssistantNoteContext> BuildNoteContextAsync(CancellationToken cancellationToken)
+    {
+        var connectionId = workspace.SelectedConnectionId ?? terminal.ActiveConnection?.Id;
+        if (connectionId is null)
+            return AssistantNoteContext.Unavailable("No workspace connection is selected.");
+
+        var connectionName = terminal.ActiveConnection?.Id == connectionId.Value
+            ? terminal.ActiveConnection.Name
+            : (await terminalConnections.GetByIdAsync(connectionId.Value, cancellationToken))?.Name;
+
+        try
+        {
+            var summaries = await noteService.ListAsync(connectionId.Value, cancellationToken);
+            return AssistantNoteContext.Available(connectionId.Value, connectionName, summaries);
+        }
+        catch (Exception ex)
+        {
+            return AssistantNoteContext.Unavailable(ex.Message);
         }
     }
 
@@ -480,6 +505,9 @@ public sealed class AssistantChatService(
         if (TryGetBoolean(root, "cancelled") == true)
             return "Command was cancelled.";
 
+        if (TryGetInt32(root, "exitCode") is { } exitCode && exitCode != 0)
+            return $"Command exited with code {exitCode}.";
+
         return null;
     }
 
@@ -530,6 +558,14 @@ public sealed class AssistantChatService(
             JsonValueKind.False => false,
             _ => null
         };
+    }
+
+    private static int? TryGetInt32(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        return property.TryGetInt32(out var value) ? value : null;
     }
 
     private async Task PersistFailedAssistantAsync(Guid conversationId, int order, string error)

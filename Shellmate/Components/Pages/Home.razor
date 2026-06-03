@@ -6,12 +6,14 @@
 @using Shellmate.Chat
 @using Shellmate.Llm
 @using Shellmate.Models
+@using Shellmate.Notes
 @using Shellmate.Tokens
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @inject IAssistantChatService ChatService
 @inject ILlmProviderService ProviderService
 @inject ITerminalConnectionService ConnectionService
+@inject IConnectionNoteService NoteService
 @inject ITerminalSessionService TerminalSession
 @inject IWorkspaceConnectionContext WorkspaceConnection
 @inject AssistantToolRegistry ToolRegistry
@@ -177,6 +179,7 @@ else
     private string _input = string.Empty;
     private string? _pendingUserText;
     private string _systemPrompt = string.Empty;
+    private AssistantNoteContext _noteContext = AssistantNoteContext.Unavailable("No workspace connection is selected.");
     private string _elevationPassword = string.Empty;
     private string? _error;
     private string? _terminalError;
@@ -260,7 +263,7 @@ else
         _providerSubtitle = _hasWorkingProvider
             ? $"Default provider: {availability.Provider!.DisplayName ?? availability.Provider.Name} / {availability.Provider.ModelId}"
             : availability.Message;
-        RefreshConversationTokenInputs();
+        await RefreshConversationTokenInputsAsync();
 
         _loading = false;
         _forceScrollKey++;
@@ -424,7 +427,7 @@ else
         SetSelectedConnection(connectionId == Guid.Empty ? null : connectionId);
         _hostKeyPrompt = null;
         _terminalError = null;
-        RefreshConversationTokenInputs();
+        await RefreshConversationTokenInputsAsync();
 
         if (_notesDrawer is not null)
             await _notesDrawer.RefreshAsync();
@@ -449,10 +452,10 @@ else
 
     private async Task RefreshNotesAfterToolAsync()
     {
-        if (_notesDrawer is null)
-            return;
+        if (_notesDrawer is not null)
+            await _notesDrawer.RefreshAsync();
 
-        await _notesDrawer.RefreshAsync();
+        await RefreshConversationTokenInputsAsync();
     }
 
     private async Task ConnectTerminalAsync(bool trustPresentedHostKey)
@@ -487,7 +490,7 @@ else
                 _terminalStatus = "Terminal connection failed.";
             }
 
-            RefreshConversationTokenInputs();
+            await RefreshConversationTokenInputsAsync();
         }
         finally
         {
@@ -500,7 +503,7 @@ else
         await TerminalSession.DisconnectAsync();
         _terminalConnected = false;
         _terminalStatus = "Disconnected.";
-        RefreshConversationTokenInputs();
+        await RefreshConversationTokenInputsAsync();
     }
 
     private async Task SendTerminalInputAsync(string data)
@@ -591,9 +594,33 @@ else
 
     private void RefreshConversationTokenInputs()
     {
-        _systemPrompt = AssistantPromptBuilder.Build(TerminalSession.GetSnapshot());
+        _systemPrompt = AssistantPromptBuilder.Build(TerminalSession.GetSnapshot(), _noteContext);
         _toolDefinitions = BuildToolDefinitions();
         UpdateConversationTokenCount();
+    }
+
+    private async Task RefreshConversationTokenInputsAsync()
+    {
+        _noteContext = await LoadAssistantNoteContextAsync();
+        RefreshConversationTokenInputs();
+    }
+
+    private async Task<AssistantNoteContext> LoadAssistantNoteContextAsync()
+    {
+        var connectionId = _selectedConnectionId ?? TerminalSession.ActiveConnection?.Id;
+        if (connectionId is null)
+            return AssistantNoteContext.Unavailable("No workspace connection is selected.");
+
+        var connectionName = SelectedConnectionName ?? TerminalSession.ActiveConnection?.Name;
+        try
+        {
+            var summaries = await NoteService.ListAsync(connectionId.Value);
+            return AssistantNoteContext.Available(connectionId.Value, connectionName, summaries);
+        }
+        catch (Exception ex)
+        {
+            return AssistantNoteContext.Unavailable(ex.Message);
+        }
     }
 
     private void UpdateConversationTokenCount()
@@ -713,15 +740,12 @@ else
             return chip;
 
         chip.Completed = toolRow.Status != AssistantMessageStatus.Pending;
+        chip.Result = toolRow.Content;
         if (toolRow.Status == AssistantMessageStatus.Failed)
         {
             chip.Error = string.IsNullOrWhiteSpace(toolRow.ErrorMessage)
                 ? "Tool call failed."
                 : toolRow.ErrorMessage;
-        }
-        else
-        {
-            chip.Result = toolRow.Content;
         }
 
         return chip;

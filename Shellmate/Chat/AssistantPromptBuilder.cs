@@ -1,9 +1,28 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Shellmate.Notes;
 using Shellmate.Terminal;
 
 namespace Shellmate.Chat;
+
+public sealed record AssistantNoteContext(
+    Guid? ConnectionId,
+    string? ConnectionName,
+    IReadOnlyList<ConnectionNoteSummary> Notes,
+    string? UnavailableReason)
+{
+    public bool IsAvailable => UnavailableReason is null;
+
+    public static AssistantNoteContext Available(
+        Guid connectionId,
+        string? connectionName,
+        IReadOnlyList<ConnectionNoteSummary> notes) =>
+        new(connectionId, connectionName, notes, UnavailableReason: null);
+
+    public static AssistantNoteContext Unavailable(string reason) =>
+        new(ConnectionId: null, ConnectionName: null, Array.Empty<ConnectionNoteSummary>(), reason);
+}
 
 public static class AssistantPromptBuilder
 {
@@ -13,7 +32,7 @@ public static class AssistantPromptBuilder
         Converters = { new JsonStringEnumConverter() }
     };
 
-    public static string Build(TerminalSnapshot terminal)
+    public static string Build(TerminalSnapshot terminal, AssistantNoteContext noteContext)
     {
         var sb = new StringBuilder();
         sb.AppendLine("""
@@ -25,7 +44,11 @@ public static class AssistantPromptBuilder
 
             Notes:
             - Notes are user-visible Markdown-style plain text scoped to the selected workspace connection.
-            - Use note tools to list, read, create, rename, update, or delete notes. Do not assume note content exists unless you read it with a tool or it appears in the conversation.
+            - The current note list is injected below as summaries only. These summaries are not note contents.
+            - If a relevant note title exists before you inspect or change a system, read that note first with read_connection_note.
+            - Use note tools to read, create, rename, update, or delete notes. Do not assume note content exists unless you read it with a tool or it appears in the conversation.
+            - After material system changes or durable discoveries, create or update focused topic notes without waiting for a separate reminder.
+            - Prefer topic-focused notes over one giant runbook. Useful topics include installed apps/packages, Docker or Compose stacks, service names, package repositories and signing keys, important config/data/log locations, users and service accounts, cron jobs, systemd timers, ports/endpoints, permission fixes, operational gotchas, and troubleshooting history.
             - Do not store passwords, API keys, private keys, tokens, or other secrets in notes unless the user explicitly asks you to write that exact information.
             - Note tools can work for the selected connection even when no terminal is connected.
 
@@ -40,6 +63,23 @@ public static class AssistantPromptBuilder
             - Treat recent terminal history as context, not as guaranteed complete machine history.
             - Keep responses concise and operational.
             """);
+
+        sb.AppendLine();
+        sb.AppendLine("Current note context:");
+        sb.AppendLine(JsonSerializer.Serialize(new
+        {
+            noteContext.IsAvailable,
+            noteContext.ConnectionId,
+            noteContext.ConnectionName,
+            noteContext.UnavailableReason,
+            noteCount = noteContext.Notes.Count,
+            notes = noteContext.Notes.Select(note => new
+            {
+                note.Title,
+                note.UpdatedAt,
+                note.ContentLength
+            })
+        }, JsonOptions));
 
         sb.AppendLine();
         sb.AppendLine("Current terminal context:");
@@ -70,6 +110,9 @@ public static class AssistantPromptBuilder
         }, JsonOptions));
         return sb.ToString();
     }
+
+    public static string Build(TerminalSnapshot terminal) =>
+        Build(terminal, AssistantNoteContext.Unavailable("No workspace connection is selected."));
 
     private static string Truncate(string? value, int maxChars)
     {

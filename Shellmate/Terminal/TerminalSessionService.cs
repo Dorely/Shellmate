@@ -659,27 +659,34 @@ public sealed partial class TerminalSessionService(
                 "echo __SHELLMATE_END_%__SM_ID%__:%__SM_CODE%",
                 string.Empty),
 
-            _ => string.Join(
-                "; ",
-                $"__sm_id='{id}'",
-                "printf '\\n%s%s%s\\n' '__SHELLMATE_START_' \"$__sm_id\" '__'",
-                $"sh -c '{EscapePosixSingleQuoted(FlattenShellCommand(execution.Command))}'",
-                "__sm_code=$?",
-                "printf '\\n%s%s%s:%s\\n' '__SHELLMATE_END_' \"$__sm_id\" '__' \"$__sm_code\"") + "\n"
+            _ => BuildPosixCommandWrapper(id, execution.Command)
         };
+    }
+
+    private static string BuildPosixCommandWrapper(string id, string command)
+    {
+        var delimiter = $"{SentinelPrefix}SCRIPT_{id}__";
+        var script = NormalizeNewlines(command);
+
+        return string.Join(
+            "\n",
+            $"__sm_id='{id}'",
+            "printf '\\n%s%s%s\\n' '__SHELLMATE_START_' \"$__sm_id\" '__'",
+            $"sh <<'{delimiter}'",
+            script,
+            delimiter,
+            "__sm_code=$?",
+            "printf '\\n%s%s%s:%s\\n' '__SHELLMATE_END_' \"$__sm_id\" '__' \"$__sm_code\"",
+            string.Empty);
     }
 
     private static string EscapePowerShellSingleQuoted(string value) =>
         value.Replace("'", "''", StringComparison.Ordinal);
 
-    private static string EscapePosixSingleQuoted(string value) =>
-        value.Replace("'", "'\\''", StringComparison.Ordinal);
-
-    private static string FlattenShellCommand(string value) =>
+    private static string NormalizeNewlines(string value) =>
         value
             .Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n')
-            .Replace('\n', ';');
+            .Replace('\r', '\n');
 
     private static bool DetectPasswordPrompt(string text)
     {
@@ -697,6 +704,47 @@ public sealed partial class TerminalSessionService(
 
     private static string CleanTerminalText(string text) =>
         SentinelLineRegex().Replace(StripAnsi(text), string.Empty).Trim();
+
+    private static string SanitizeCommandOutput(string text)
+    {
+        if (!text.Contains('\b', StringComparison.Ordinal))
+            return text;
+
+        var sanitized = new StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            if (ch == '\b')
+            {
+                if (sanitized.Length > 0)
+                    sanitized.Length--;
+                continue;
+            }
+
+            sanitized.Append(ch);
+        }
+
+        return sanitized.ToString();
+    }
+
+    private static string BoundCommandOutput(string output, int maxChars, out bool truncated)
+    {
+        truncated = output.Length > maxChars;
+        if (!truncated)
+            return output;
+
+        var marker = "\n\n--- Shellmate output truncated; omitted middle content. ---\n\n";
+        var available = Math.Max(0, maxChars - marker.Length);
+        var headLength = available / 2;
+        var tailLength = available - headLength;
+        var omitted = output.Length - headLength - tailLength;
+        marker = $"\n\n--- Shellmate output truncated; omitted {omitted} characters from the middle. ---\n\n";
+
+        available = Math.Max(0, maxChars - marker.Length);
+        headLength = available / 2;
+        tailLength = available - headLength;
+
+        return output[..headLength] + marker + output[^tailLength..];
+    }
 
     private static string StripAnsi(string text) =>
         AnsiRegex().Replace(text, string.Empty);
@@ -851,10 +899,8 @@ public sealed partial class TerminalSessionService(
                 raw = _raw.ToString();
 
             var extracted = ExtractVisibleOutput(raw, StartToken, EndPrefix, includeIncomplete: true);
-            var output = CleanTerminalText(extracted.Output);
-            var truncated = output.Length > maxOutputChars;
-            if (truncated)
-                output = output[^maxOutputChars..];
+            var output = SanitizeCommandOutput(CleanTerminalText(extracted.Output));
+            output = BoundCommandOutput(output, maxOutputChars, out var truncated);
 
             return new TerminalCommandResult(
                 Id,

@@ -1,12 +1,18 @@
+@using System.Text.Json
 @namespace Shellmate.Components.Chat
+
+@{
+    var shellResult = TryParseShellResult();
+    var summaryText = SummaryText;
+}
 
 <details class="chat-chip @StateClass">
     <summary>
         <span class="chat-chip-icon">@IconText</span>
         <span class="chat-chip-name">@Chip.Name</span>
-        @if (Chip.HasArguments)
+        @if (!string.IsNullOrWhiteSpace(summaryText))
         {
-            <span class="chat-chip-args">@ChatTranscriptHelpers.TruncateInline(Chip.ArgumentsJson, 96)</span>
+            <span class="chat-chip-args">@summaryText</span>
         }
         @if (Chip.DurationMs is { } duration)
         {
@@ -14,7 +20,12 @@
         }
     </summary>
     <div class="chat-chip-body">
-        @if (Chip.HasArguments || !Chip.ArgumentsComplete)
+        @if (shellResult is not null)
+        {
+            <div class="chat-chip-section">command</div>
+            <pre class="chat-chip-pre">@shellResult.Command</pre>
+        }
+        else if (Chip.HasArguments || !Chip.ArgumentsComplete)
         {
             <div class="chat-chip-section">args</div>
             <pre class="chat-chip-pre">@Chip.ArgumentsJson@if (!Chip.ArgumentsComplete) { <span class="chat-cursor">|</span> }</pre>
@@ -24,12 +35,16 @@
             <div class="chat-chip-section">error</div>
             <pre class="chat-chip-pre chat-chip-pre-error">@Chip.Error</pre>
         }
-        else if (Chip.Result is not null)
+        @if (shellResult is not null)
+        {
+            @RenderShellResult(shellResult)
+        }
+        @if (shellResult is null && Chip.Result is not null)
         {
             <div class="chat-chip-section">result</div>
             <pre class="chat-chip-pre">@Chip.Result</pre>
         }
-        else
+        @if (shellResult is null && Chip.Result is null && Chip.Error is null)
         {
             <div class="chat-chip-section text-muted"><em>@PendingText</em></div>
         }
@@ -38,6 +53,21 @@
 
 @code {
     [Parameter, EditorRequired] public ChatToolChip Chip { get; set; } = null!;
+
+    private bool IsShellTool => Chip.Name == "run_shell_command";
+
+    private string? SummaryText
+    {
+        get
+        {
+            if (IsShellTool && TryGetJsonString(Chip.ArgumentsJson, "command", out var command))
+                return ChatTranscriptHelpers.TruncateInline(command, 96);
+
+            return Chip.HasArguments
+                ? ChatTranscriptHelpers.TruncateInline(Chip.ArgumentsJson, 96)
+                : null;
+        }
+    }
 
     private string StateClass => Chip.Error is not null
         ? "chat-chip-error"
@@ -61,4 +91,129 @@
         durationMs >= 1000
             ? $"{durationMs / 1000:0.0}s"
             : $"{durationMs:0}ms";
+
+    private RenderFragment RenderShellResult(ShellToolResult result) => __builder =>
+    {
+        <div class="chat-chip-section">status</div>
+        <div class="chat-chip-meta">
+            <span class="@ExitClass(result.ExitCode)">@FormatExitCode(result.ExitCode)</span>
+            @if (result.TimedOut)
+            {
+                <span class="chat-chip-meta-pill chat-chip-meta-error">timed out</span>
+            }
+            @if (result.Cancelled)
+            {
+                <span class="chat-chip-meta-pill chat-chip-meta-error">cancelled</span>
+            }
+            @if (result.OutputTruncated)
+            {
+                <span class="chat-chip-meta-pill chat-chip-meta-warn">truncated</span>
+            }
+        </div>
+        @if (!string.IsNullOrWhiteSpace(result.Error) && !string.Equals(result.Error, Chip.Error, StringComparison.Ordinal))
+        {
+            <div class="chat-chip-section">command error</div>
+            <pre class="chat-chip-pre chat-chip-pre-error">@result.Error</pre>
+        }
+        <div class="chat-chip-section">output</div>
+        <pre class="chat-chip-pre">@result.Output</pre>
+    };
+
+    private ShellToolResult? TryParseShellResult()
+    {
+        if (!IsShellTool || string.IsNullOrWhiteSpace(Chip.Result))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(Chip.Result);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var command = GetString(root, "command");
+            if (string.IsNullOrWhiteSpace(command))
+                return null;
+
+            return new ShellToolResult(
+                command,
+                GetInt32(root, "exitCode"),
+                GetBoolean(root, "timedOut"),
+                GetBoolean(root, "cancelled"),
+                GetString(root, "output") ?? string.Empty,
+                GetBoolean(root, "outputTruncated"),
+                GetString(root, "error"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetJsonString(string json, string propertyName, out string value)
+    {
+        value = string.Empty;
+        if (string.IsNullOrWhiteSpace(json))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty(propertyName, out var property) ||
+                property.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            value = property.GetString() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(value);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? GetString(JsonElement root, string propertyName)
+    {
+        return root.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+    }
+
+    private static int? GetInt32(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+            return null;
+
+        return property.TryGetInt32(out var value) ? value : null;
+    }
+
+    private static bool GetBoolean(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property))
+            return false;
+
+        return property.ValueKind == JsonValueKind.True;
+    }
+
+    private static string FormatExitCode(int? exitCode) =>
+        exitCode is null ? "exit n/a" : $"exit {exitCode}";
+
+    private static string ExitClass(int? exitCode) => exitCode switch
+    {
+        0 => "chat-chip-meta-pill chat-chip-meta-ok",
+        null => "chat-chip-meta-pill",
+        _ => "chat-chip-meta-pill chat-chip-meta-error"
+    };
+
+    private sealed record ShellToolResult(
+        string Command,
+        int? ExitCode,
+        bool TimedOut,
+        bool Cancelled,
+        string Output,
+        bool OutputTruncated,
+        string? Error);
 }
