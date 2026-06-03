@@ -164,6 +164,7 @@ else
     private bool _redirecting;
     private bool _hasWorkingProvider;
     private bool _notesOpen;
+    private bool _disposed;
     private ChatTranscriptTokenCount _conversationTokens = ChatTranscriptTokenCount.Empty;
     private int _forceScrollKey;
     private int _scrollKey;
@@ -241,17 +242,21 @@ else
         if (_outputCts is not null)
             return;
 
-        _outputCts?.Cancel();
-        _outputCts?.Dispose();
-        _outputCts = new CancellationTokenSource();
+        var outputCts = new CancellationTokenSource();
+        var cancellationToken = outputCts.Token;
+        _outputCts = outputCts;
+
         _ = Task.Run(async () =>
         {
             try
             {
-                await foreach (var output in TerminalSession.SubscribeOutputAsync(includeReplay: true, _outputCts.Token))
+                await foreach (var output in TerminalSession.SubscribeOutputAsync(includeReplay: true, cancellationToken))
                 {
                     await InvokeAsync(async () =>
                     {
+                        if (_disposed || cancellationToken.IsCancellationRequested)
+                            return;
+
                         switch (output.Kind)
                         {
                             case TerminalOutputKind.Data:
@@ -282,7 +287,10 @@ else
                     });
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (ObjectDisposedException) when (_disposed || cancellationToken.IsCancellationRequested)
             {
             }
         });
@@ -688,12 +696,15 @@ else
 
     public ValueTask DisposeAsync()
     {
+        _disposed = true;
         TerminalSession.StateChanged -= OnTerminalStateChanged;
         ChatRuntime.StateChanged -= OnChatRuntimeStateChanged;
         ChatRuntime.NotesChanged -= OnChatRuntimeNotesChanged;
         _outputCts?.Cancel();
         _outputCts?.Dispose();
         _outputCts = null;
+        _terminal = null;
+        _notesDrawer = null;
         return ValueTask.CompletedTask;
     }
 }
