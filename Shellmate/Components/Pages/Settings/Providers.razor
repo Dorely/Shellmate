@@ -14,11 +14,11 @@
 
 <div class="settings-page">
     <header class="settings-header">
-        <div>
+        <div class="settings-title">
             <h1>Providers</h1>
             <p>Configure the chat models Shellmate can use. OpenAI account sign-in and OpenAI-compatible API endpoints are supported in this first slice.</p>
         </div>
-        <a class="btn btn-outline-secondary" href="">Back to chat</a>
+        <a class="btn btn-outline-secondary settings-back-link" href="">Back to chat</a>
     </header>
 
     @if (!string.IsNullOrEmpty(_statusMessage))
@@ -38,7 +38,7 @@
 
     <section class="settings-section">
         <div class="section-heading">
-            <div>
+            <div class="section-title">
                 <h2>OpenAI Account</h2>
                 <p>Sign in with your OpenAI account. No API key is stored for this provider.</p>
             </div>
@@ -57,23 +57,19 @@
 
         @if (_codexProvider is not null)
         {
-            <div class="row g-2 align-items-end">
-                <div class="col-md-4 col-lg-3">
+            <div class="codex-provider-form">
+                <div class="provider-field codex-model-field">
                     <label class="form-label form-label-sm">Model</label>
                     <input type="text" class="form-control form-control-sm" @bind="_codexProvider.ModelId" />
                 </div>
-                <div class="col-auto">
+                <div class="provider-inline-actions">
                     <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => SaveProviderAsync(_codexProvider)">Save</button>
-                </div>
-                <div class="col-auto">
                     <button type="button" class="btn btn-sm btn-outline-info"
                             disabled="@(_testingProviderId is not null)"
                             @onclick="() => TestProviderAsync(_codexProvider)">
                         @(_testingProviderId == _codexProvider.Id ? "Testing..." : "Test")
                     </button>
-                </div>
-                <div class="col-auto">
-                    @RenderChatStatus(_codexProvider)
+                    <span class="badge-stack">@RenderChatStatus(_codexProvider)</span>
                 </div>
             </div>
         }
@@ -81,7 +77,7 @@
 
     <section class="settings-section">
         <div class="section-heading">
-            <div>
+            <div class="section-title">
                 <h2>OpenAI-Compatible Endpoints</h2>
                 <p>Add local or hosted endpoints that expose the OpenAI chat API shape.</p>
             </div>
@@ -93,33 +89,43 @@
         }
         else
         {
-            <div class="table-responsive">
-                <table class="table align-middle provider-table">
+            <div class="table-responsive provider-table-shell">
+                <table class="table align-middle provider-table mb-0">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Endpoint</th>
-                            <th>Model</th>
-                            <th>Auth</th>
-                            <th>Status</th>
-                            <th>Default</th>
-                            <th>Actions</th>
+                            <th class="provider-name-column">Name</th>
+                            <th class="provider-endpoint-column">Endpoint</th>
+                            <th class="provider-model-column">Model</th>
+                            <th class="provider-auth-column">Auth</th>
+                            <th class="provider-status-column">Status</th>
+                            <th class="provider-default-column">Default</th>
+                            <th class="provider-actions-column">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         @foreach (var provider in _parents)
                         {
                             <tr>
-                                <td>
-                                    <input class="form-control form-control-sm" @bind="provider.DisplayName" placeholder="@provider.Name" />
-                                    <div class="small text-muted">@provider.Name</div>
+                                <td class="provider-name-cell">
+                                    <input class="form-control form-control-sm provider-name-input" @bind="provider.DisplayName" placeholder="@provider.Name" />
+                                    <div class="provider-key">@provider.Name</div>
                                 </td>
-                                <td><input class="form-control form-control-sm endpoint-input" @bind="provider.EndpointUrl" /></td>
-                                <td><input class="form-control form-control-sm model-input" @bind="provider.ModelId" /></td>
-                                <td>@RenderAuthCell(provider)</td>
-                                <td>@RenderChatStatus(provider)</td>
-                                <td>@RenderDefaultCell(provider)</td>
-                                <td>
+                                <td class="provider-endpoint-cell">
+                                    <input class="form-control form-control-sm endpoint-input" @bind="provider.EndpointUrl" />
+                                </td>
+                                <td class="provider-model-cell">
+                                    <input class="form-control form-control-sm model-input" @bind="provider.ModelId" />
+                                </td>
+                                <td class="provider-auth-cell">
+                                    <div class="badge-stack">@RenderAuthCell(provider)</div>
+                                </td>
+                                <td class="provider-status-cell">
+                                    <div class="badge-stack">@RenderChatStatus(provider)</div>
+                                </td>
+                                <td class="provider-default-cell">
+                                    <div class="default-cell">@RenderDefaultCell(provider)</div>
+                                </td>
+                                <td class="provider-actions-cell">
                                     <div class="action-row">
                                         @if (provider.AuthType == AuthType.OAuth)
                                         {
@@ -148,16 +154,26 @@
                                 @foreach (var child in children)
                                 {
                                     <tr class="child-row">
-                                        <td>
-                                            <input class="form-control form-control-sm" @bind="child.DisplayName" placeholder="@child.Name" />
-                                            <div class="small text-muted">inherits credentials from @(provider.DisplayName ?? provider.Name)</div>
+                                        <td class="provider-name-cell">
+                                            <input class="form-control form-control-sm provider-name-input" @bind="child.DisplayName" placeholder="@child.Name" />
+                                            <div class="provider-key">inherits credentials from @(provider.DisplayName ?? provider.Name)</div>
                                         </td>
-                                        <td><input class="form-control form-control-sm endpoint-input" @bind="child.EndpointUrl" /></td>
-                                        <td><input class="form-control form-control-sm model-input" @bind="child.ModelId" /></td>
-                                        <td><span class="badge text-bg-light">Inherited</span></td>
-                                        <td>@RenderChatStatus(child)</td>
-                                        <td>@RenderDefaultCell(child)</td>
-                                        <td>
+                                        <td class="provider-endpoint-cell">
+                                            <input class="form-control form-control-sm endpoint-input" @bind="child.EndpointUrl" />
+                                        </td>
+                                        <td class="provider-model-cell">
+                                            <input class="form-control form-control-sm model-input" @bind="child.ModelId" />
+                                        </td>
+                                        <td class="provider-auth-cell">
+                                            <div class="badge-stack"><span class="badge text-bg-light inherited-badge">Inherited</span></div>
+                                        </td>
+                                        <td class="provider-status-cell">
+                                            <div class="badge-stack">@RenderChatStatus(child)</div>
+                                        </td>
+                                        <td class="provider-default-cell">
+                                            <div class="default-cell">@RenderDefaultCell(child)</div>
+                                        </td>
+                                        <td class="provider-actions-cell">
                                             <div class="action-row">
                                                 <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="() => SaveProviderAsync(child)">Save</button>
                                                 <button type="button" class="btn btn-sm btn-outline-info"
@@ -176,16 +192,18 @@
                                 <tr class="child-form-row">
                                     <td colspan="7">
                                         <div class="child-form">
-                                            <div>
+                                            <div class="provider-field">
                                                 <label class="form-label form-label-sm">Display Name</label>
                                                 <input type="text" class="form-control form-control-sm" placeholder="GPT-5 Mini" @bind="draft.DisplayName" />
                                             </div>
-                                            <div>
+                                            <div class="provider-field">
                                                 <label class="form-label form-label-sm">Model ID</label>
                                                 <input type="text" class="form-control form-control-sm" placeholder="gpt-5-mini" @bind="draft.ModelId" />
                                             </div>
-                                            <button type="button" class="btn btn-sm btn-primary" @onclick="() => AddChildModelAsync(provider, draft)">Add and Test</button>
-                                            <button type="button" class="btn btn-sm btn-link" @onclick="() => _childForms.Remove(provider.Id)">Cancel</button>
+                                            <div class="child-form-actions">
+                                                <button type="button" class="btn btn-sm btn-primary" @onclick="() => AddChildModelAsync(provider, draft)">Add and Test</button>
+                                                <button type="button" class="btn btn-sm btn-link" @onclick="() => _childForms.Remove(provider.Id)">Cancel</button>
+                                            </div>
                                         </div>
                                     </td>
                                 </tr>
@@ -199,30 +217,30 @@
 
     <section class="settings-section">
         <div class="section-heading">
-            <div>
+            <div class="section-title">
                 <h2>Add Provider</h2>
                 <p>Run Test before adding the provider so chat only enables known-working models.</p>
             </div>
         </div>
 
         <div class="add-provider-grid">
-            <div>
+            <div class="provider-field">
                 <label class="form-label form-label-sm">Name</label>
                 <input type="text" class="form-control form-control-sm" @bind="_newProvider.Name" placeholder="ollama-local" />
             </div>
-            <div>
+            <div class="provider-field">
                 <label class="form-label form-label-sm">Display Name</label>
                 <input type="text" class="form-control form-control-sm" @bind="_newProvider.DisplayName" placeholder="Local Llama" />
             </div>
-            <div>
+            <div class="provider-field provider-field-wide">
                 <label class="form-label form-label-sm">Endpoint URL</label>
                 <input type="text" class="form-control form-control-sm" @bind="_newProvider.EndpointUrl" placeholder="http://localhost:11434/v1" />
             </div>
-            <div>
+            <div class="provider-field">
                 <label class="form-label form-label-sm">Model ID</label>
                 <input type="text" class="form-control form-control-sm" @bind="_newProvider.ModelId" placeholder="llama3" />
             </div>
-            <div>
+            <div class="provider-field">
                 <label class="form-label form-label-sm">Auth</label>
                 <select class="form-select form-select-sm" @bind="_newProvider.AuthType">
                     <option value="@AuthType.None">None</option>
@@ -231,7 +249,7 @@
             </div>
             @if (_newProvider.AuthType == AuthType.ApiKey)
             {
-                <div>
+                <div class="provider-field provider-field-wide">
                     <label class="form-label form-label-sm">API Key</label>
                     <input type="password" class="form-control form-control-sm" @bind="_newProvider.ApiKey" />
                 </div>
@@ -559,11 +577,11 @@
             <span class="badge text-bg-info">OAuth</span>
             if (_oauthStatus.TryGetValue(provider.Id, out var connected) && connected)
             {
-                <span class="badge text-bg-success ms-1">Connected</span>
+                <span class="badge text-bg-success">Connected</span>
             }
             else
             {
-                <span class="badge text-bg-warning ms-1">Disconnected</span>
+                <span class="badge text-bg-warning">Disconnected</span>
             }
             return;
         }
@@ -572,7 +590,7 @@
         {
             <span class="badge text-bg-secondary">API Key</span>
             <input type="password"
-                   class="form-control form-control-sm mt-1"
+                   class="form-control form-control-sm provider-secret-input"
                    placeholder="New key (leave blank to keep)"
                    value="@GetApiKeyUpdate(provider.Id)"
                    @oninput="args => SetApiKeyUpdate(provider.Id, args.Value?.ToString() ?? string.Empty)" />
@@ -586,23 +604,23 @@
     {
         if (IsChatReady(provider))
         {
-            <span class="badge text-bg-success" title="This provider is ready for chat.">Ready</span>
+            <span class="badge text-bg-success provider-badge" title="This provider is ready for chat.">Ready</span>
             return;
         }
 
         if (provider.LastChatTestedAt is null)
         {
-            <span class="badge text-bg-secondary" title="Run Test successfully before using this provider for chat.">Untested</span>
+            <span class="badge text-bg-secondary provider-badge" title="Run Test successfully before using this provider for chat.">Untested</span>
             return;
         }
 
         if (provider.LastChatTestSucceeded && !provider.HasCurrentChatTestSnapshot)
         {
-            <span class="badge text-bg-warning" title="Provider settings changed after the last successful test.">Retest</span>
+            <span class="badge text-bg-warning provider-badge" title="Provider settings changed after the last successful test.">Retest</span>
             return;
         }
 
-        <span class="badge text-bg-danger" title="@provider.LastChatTestError">Failed</span>
+        <span class="badge text-bg-danger provider-badge" title="@provider.LastChatTestError">Failed</span>
     };
 
     private RenderFragment RenderDefaultCell(LlmProvider provider) => __builder =>
@@ -614,7 +632,7 @@
         }
 
         <button type="button"
-                class="btn btn-sm btn-outline-primary"
+                class="btn btn-sm btn-outline-primary default-button"
                 disabled="@(!IsChatReady(provider))"
                 title="@DefaultButtonTitle(provider)"
                 @onclick="() => SetDefaultAsync(provider.Id)">
