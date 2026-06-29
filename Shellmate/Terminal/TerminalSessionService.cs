@@ -371,35 +371,36 @@ public sealed partial class TerminalSessionService(
 
         activeCommand.Append(output.Text);
 
-        if (activeCommand.ShouldCheckElevationPrompt
-            && TryDetectPasswordPrompt(activeCommand.VisibleOutputTail(2_000), out var promptText))
+        var reservation = activeCommand.TryReserveNewElevationPrompt(
+            MaxElevationPromptAttempts,
+            2_000,
+            out var attempt,
+            out var promptText);
+
+        if (reservation == ElevationPromptReservation.TooManyAttempts)
+        {
+            var repeatedPromptResult = activeCommand.BuildResult(
+                EffectiveCommandOutputMaxChars(),
+                exitCode: null,
+                timedOut: false,
+                cancelled: true,
+                error: "Elevation prompt repeated too many times.");
+            var completedByThisPath = activeCommand.TryComplete(repeatedPromptResult);
+            logger.LogWarning(
+                "Terminal elevation prompt repeated too many times for command {CommandId}.",
+                activeCommand.Id);
+            ClearPendingElevationPromptAndNotify("repeated elevation prompt");
+            if (completedByThisPath)
+                await InterruptCommandAsync(_activeSession);
+            return;
+        }
+
+        if (reservation == ElevationPromptReservation.Reserved)
         {
             logger.LogDebug(
                 "Detected terminal elevation prompt for command {CommandId}: {PromptText}",
                 activeCommand.Id,
                 promptText);
-            var reservation = activeCommand.TryReserveElevationPrompt(MaxElevationPromptAttempts, out var attempt);
-            if (reservation == ElevationPromptReservation.AlreadyPending || reservation == ElevationPromptReservation.Completed)
-                return;
-
-            if (reservation == ElevationPromptReservation.TooManyAttempts)
-            {
-                var repeatedPromptResult = activeCommand.BuildResult(
-                    EffectiveCommandOutputMaxChars(),
-                    exitCode: null,
-                    timedOut: false,
-                    cancelled: true,
-                    error: "Elevation prompt repeated too many times.");
-                var completedByThisPath = activeCommand.TryComplete(repeatedPromptResult);
-                logger.LogWarning(
-                    "Terminal elevation prompt repeated too many times for command {CommandId}.",
-                    activeCommand.Id);
-                ClearPendingElevationPromptAndNotify("repeated elevation prompt");
-                if (completedByThisPath)
-                    await InterruptCommandAsync(_activeSession);
-                return;
-            }
-
             _ = Task.Run(
                 () => HandleElevationPromptAsync(activeCommand, attempt, promptText, cancellationToken),
                 CancellationToken.None);
@@ -1085,6 +1086,7 @@ public sealed partial class TerminalSessionService(
     private enum ElevationPromptReservation
     {
         Reserved,
+        NoPrompt,
         AlreadyPending,
         TooManyAttempts,
         Completed
@@ -1096,6 +1098,7 @@ public sealed partial class TerminalSessionService(
         private readonly StringBuilder _raw = new();
         private int _elevationPromptAttempts;
         private bool _elevationPromptPending;
+        private int _elevationHandledMeaningfulCount = -1;
         private bool _seenStart;
 
         private ShellCommandExecution(Guid id, string command, TerminalShellKind shellKind)
@@ -1121,30 +1124,12 @@ public sealed partial class TerminalSessionService(
 
         public bool IsCompleted => Completion.Task.IsCompleted;
 
-        public bool ShouldCheckElevationPrompt
-        {
-            get
-            {
-                lock (_gate)
-                    return _seenStart && !Completion.Task.IsCompleted;
-            }
-        }
-
         public string VisibleOutput
         {
             get
             {
                 lock (_gate)
                     return ExtractVisibleOutput(_raw.ToString(), StartToken, EndPrefix, includeIncomplete: true).Output;
-            }
-        }
-
-        public string VisibleOutputTail(int maxChars)
-        {
-            lock (_gate)
-            {
-                var output = ExtractVisibleOutput(_raw.ToString(), StartToken, EndPrefix, includeIncomplete: true).Output;
-                return output.Length <= maxChars ? output : output[^maxChars..];
             }
         }
 
@@ -1166,27 +1151,60 @@ public sealed partial class TerminalSessionService(
         public TerminalCommandResult CurrentResultOr(TerminalCommandResult fallback) =>
             Completion.Task.IsCompletedSuccessfully ? Completion.Task.Result : fallback;
 
-        public ElevationPromptReservation TryReserveElevationPrompt(int maxAttempts, out int attempt)
+        public ElevationPromptReservation TryReserveNewElevationPrompt(
+            int maxAttempts,
+            int tailChars,
+            out int attempt,
+            out string promptText)
         {
+            promptText = string.Empty;
             lock (_gate)
             {
                 attempt = _elevationPromptAttempts;
-                if (Completion.Task.IsCompleted)
+                if (!_seenStart || Completion.Task.IsCompleted)
                     return ElevationPromptReservation.Completed;
 
                 if (_elevationPromptPending)
                     return ElevationPromptReservation.AlreadyPending;
 
+                var visible = ExtractVisibleOutput(_raw.ToString(), StartToken, EndPrefix, includeIncomplete: true).Output;
+                var cleaned = StripAnsi(SanitizeCommandOutput(visible));
+                if (cleaned.Length == 0)
+                    return ElevationPromptReservation.NoPrompt;
+
+                // Only treat a tail match as a NEW prompt if genuinely new meaningful output
+                // has arrived since the last handled prompt. Otherwise the same lingering
+                // "[sudo] password for ...:" tail would re-open the modal after we already
+                // sent the password, and the next response would leak into the shell.
+                var meaningful = CountMeaningful(cleaned);
+                if (_elevationHandledMeaningfulCount >= 0 && meaningful <= _elevationHandledMeaningfulCount)
+                    return ElevationPromptReservation.NoPrompt;
+
+                var tail = cleaned.Length > tailChars ? cleaned[^tailChars..] : cleaned;
+                if (!TryDetectPasswordPrompt(tail, out promptText))
+                    return ElevationPromptReservation.NoPrompt;
+
                 if (_elevationPromptAttempts >= maxAttempts)
-                {
                     return ElevationPromptReservation.TooManyAttempts;
-                }
 
                 _elevationPromptAttempts++;
                 _elevationPromptPending = true;
+                _elevationHandledMeaningfulCount = meaningful;
                 attempt = _elevationPromptAttempts;
                 return ElevationPromptReservation.Reserved;
             }
+        }
+
+        private static int CountMeaningful(string text)
+        {
+            var count = 0;
+            foreach (var ch in text)
+            {
+                if (!char.IsWhiteSpace(ch) && !char.IsControl(ch))
+                    count++;
+            }
+
+            return count;
         }
 
         public void MarkElevationPromptHandled()
