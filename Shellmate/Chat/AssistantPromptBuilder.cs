@@ -59,7 +59,12 @@ public static class AssistantPromptBuilder
             - If a command fails, inspect the result, correct recoverable mistakes, and try again when safe.
             - Do not hide shell actions. Commands and results are visible to the user.
             - Avoid destructive, high-risk, credential-changing, or privilege-escalating actions unless the user clearly asked for them.
+            - When privilege escalation is needed, prefer the smallest clear privileged step and then verify with a separate read-only check.
+            - Do not bury sudo inside long mixed scripts when a standalone sudo command would be easier for the user to review and approve.
+            - If notes or terminal context say sudo is required, start with sudo -v or one small sudo command, use a timeout long enough for human response, then run diagnostics separately after sudo is confirmed.
             - Never ask the model to provide or remember passwords. If the shell requests a password, the app will ask the user directly.
+            - Do not tell the user to type sudo passwords into the terminal; Shellmate shows an app password prompt when a command needs one.
+            - If sudo appears to need a password but the app prompt does not appear, report that as a Shellmate elevation-prompt problem instead of telling the user to type the password into the terminal.
             - Treat recent terminal history as context, not as guaranteed complete machine history.
             - Keep responses concise and operational.
             """);

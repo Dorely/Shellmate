@@ -190,6 +190,12 @@ public sealed partial class TerminalSessionService(
             var connection = ActiveConnection;
             if (session is null || connection is null)
                 return DisconnectedCommandResult(command, "No terminal is connected.");
+            if (HasPendingElevationPrompt())
+            {
+                return DisconnectedCommandResult(
+                    command,
+                    "Terminal is waiting for a password prompt; respond to or deny the prompt before running another command.");
+            }
 
             var shell = ResolveShellDescriptor(connection);
             var execution = ShellCommandExecution.Create(command.Trim(), shell.Kind);
@@ -217,30 +223,39 @@ public sealed partial class TerminalSessionService(
             {
                 await session.SendAsync(wrapper, cancellationToken);
                 var result = await execution.Completion.Task.WaitAsync(timeoutCts.Token);
+                ClearPendingElevationPromptAndNotify("command completed");
                 UpdateCommandRecord(result);
                 return result;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await InterruptCommandAsync(session);
                 var result = execution.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
                     timedOut: false,
                     cancelled: true,
                     error: "Command was cancelled.");
+                var completedByThisPath = execution.TryComplete(result);
+                ClearPendingElevationPromptAndNotify("command cancelled");
+                if (completedByThisPath)
+                    await InterruptCommandAsync(session);
+                result = execution.CurrentResultOr(result);
                 UpdateCommandRecord(result);
                 return result;
             }
             catch (OperationCanceledException)
             {
-                await InterruptCommandAsync(session);
                 var result = execution.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
                     timedOut: true,
                     cancelled: false,
                     error: $"Command timed out after {timeout.TotalSeconds:0} seconds.");
+                var completedByThisPath = execution.TryComplete(result);
+                ClearPendingElevationPromptAndNotify("command timed out");
+                if (completedByThisPath)
+                    await InterruptCommandAsync(session);
+                result = execution.CurrentResultOr(result);
                 UpdateCommandRecord(result);
                 return result;
             }
@@ -273,6 +288,9 @@ public sealed partial class TerminalSessionService(
         lock (_stateGate)
             completion = _elevationResponse;
 
+        logger.LogDebug(
+            "Terminal elevation prompt response received: {Approved}.",
+            response.Approved ? "approved" : "denied");
         completion?.TrySetResult(response);
         return Task.CompletedTask;
     }
@@ -323,8 +341,8 @@ public sealed partial class TerminalSessionService(
         {
             await foreach (var output in backendOutput.Reader.ReadAllAsync(CancellationToken.None))
             {
-                await RecordOutputAsync(output, cancellationToken);
                 PublishOutput(output);
+                await RecordOutputAsync(output, cancellationToken);
             }
 
             await pumpTask;
@@ -352,45 +370,64 @@ public sealed partial class TerminalSessionService(
             return;
 
         activeCommand.Append(output.Text);
-        if (activeCommand.TryBuildCompletedResult(EffectiveCommandOutputMaxChars(), out var completed))
-        {
-            activeCommand.Completion.TrySetResult(completed);
-            return;
-        }
 
-        if (activeCommand.ShouldCheckElevationPrompt && DetectPasswordPrompt(activeCommand.VisibleOutput))
+        if (activeCommand.ShouldCheckElevationPrompt
+            && TryDetectPasswordPrompt(activeCommand.VisibleOutputTail(2_000), out var promptText))
         {
-            if (!activeCommand.TryReserveElevationPrompt(MaxElevationPromptAttempts, out var attempt))
+            logger.LogDebug(
+                "Detected terminal elevation prompt for command {CommandId}: {PromptText}",
+                activeCommand.Id,
+                promptText);
+            var reservation = activeCommand.TryReserveElevationPrompt(MaxElevationPromptAttempts, out var attempt);
+            if (reservation == ElevationPromptReservation.AlreadyPending || reservation == ElevationPromptReservation.Completed)
+                return;
+
+            if (reservation == ElevationPromptReservation.TooManyAttempts)
             {
-                activeCommand.Completion.TrySetResult(activeCommand.BuildResult(
+                var repeatedPromptResult = activeCommand.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
                     timedOut: false,
                     cancelled: true,
-                    error: "Elevation prompt repeated too many times."));
-                await InterruptCommandAsync(_activeSession);
+                    error: "Elevation prompt repeated too many times.");
+                var completedByThisPath = activeCommand.TryComplete(repeatedPromptResult);
+                logger.LogWarning(
+                    "Terminal elevation prompt repeated too many times for command {CommandId}.",
+                    activeCommand.Id);
+                ClearPendingElevationPromptAndNotify("repeated elevation prompt");
+                if (completedByThisPath)
+                    await InterruptCommandAsync(_activeSession);
                 return;
             }
 
-            await HandleElevationPromptAsync(activeCommand, attempt, cancellationToken);
+            _ = Task.Run(
+                () => HandleElevationPromptAsync(activeCommand, attempt, promptText, cancellationToken),
+                CancellationToken.None);
+        }
+
+        if (activeCommand.TryBuildCompletedResult(EffectiveCommandOutputMaxChars(), out var completed))
+        {
+            activeCommand.TryComplete(completed);
+            return;
         }
     }
 
     private async Task HandleElevationPromptAsync(
         ShellCommandExecution execution,
         int attempt,
+        string promptText,
         CancellationToken cancellationToken)
     {
         var session = _activeSession;
         if (session is null)
         {
-            execution.Completion.TrySetResult(execution.BuildResult(
+            execution.TryComplete(execution.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
                 timedOut: false,
                 cancelled: true,
                 error: "The command requested a password, but no terminal session is available."));
-            await InterruptCommandAsync(session);
+            execution.MarkElevationPromptHandled();
             return;
         }
 
@@ -400,9 +437,12 @@ public sealed partial class TerminalSessionService(
                 Guid.NewGuid(),
                 ActiveConnection?.Name ?? "terminal",
                 execution.Command,
-                LastPromptLine(execution.VisibleOutput),
+                promptText,
                 attempt);
             var response = await RequestElevationAsync(prompt, cancellationToken);
+            if (execution.IsCompleted)
+                return;
+
             if (response.Approved && !string.IsNullOrEmpty(response.Password))
             {
                 await session.SendAsync(response.Password + "\n", cancellationToken);
@@ -410,7 +450,7 @@ public sealed partial class TerminalSessionService(
             }
 
             await InterruptCommandAsync(session);
-            execution.Completion.TrySetResult(execution.BuildResult(
+            execution.TryComplete(execution.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
                 timedOut: false,
@@ -419,24 +459,34 @@ public sealed partial class TerminalSessionService(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await InterruptCommandAsync(session);
-            execution.Completion.TrySetResult(execution.BuildResult(
-                EffectiveCommandOutputMaxChars(),
-                exitCode: null,
-                timedOut: false,
-                cancelled: true,
-                error: "Elevation prompt was cancelled."));
+            if (!execution.IsCompleted)
+            {
+                await InterruptCommandAsync(session);
+                execution.TryComplete(execution.BuildResult(
+                    EffectiveCommandOutputMaxChars(),
+                    exitCode: null,
+                    timedOut: false,
+                    cancelled: true,
+                    error: "Elevation prompt was cancelled."));
+            }
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Elevation prompt failed.");
-            await InterruptCommandAsync(session);
-            execution.Completion.TrySetResult(execution.BuildResult(
-                EffectiveCommandOutputMaxChars(),
-                exitCode: null,
-                timedOut: false,
-                cancelled: true,
-                error: ex.Message));
+            if (!execution.IsCompleted)
+            {
+                await InterruptCommandAsync(session);
+                execution.TryComplete(execution.BuildResult(
+                    EffectiveCommandOutputMaxChars(),
+                    exitCode: null,
+                    timedOut: false,
+                    cancelled: true,
+                    error: ex.Message));
+            }
+        }
+        finally
+        {
+            execution.MarkElevationPromptHandled();
         }
     }
 
@@ -452,12 +502,21 @@ public sealed partial class TerminalSessionService(
             PendingElevationPrompt = prompt;
             _elevationResponse = completion;
         }
+        logger.LogDebug(
+            "Terminal elevation prompt state set. PromptId={PromptId}, Attempt={Attempt}, Connection={ConnectionName}.",
+            prompt.Id,
+            prompt.Attempt,
+            prompt.ConnectionName);
         NotifyStateChanged();
 
         using var registration = cancellationToken.Register(() =>
             completion.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null)));
 
         var response = await completion.Task;
+        logger.LogDebug(
+            "Terminal elevation prompt completed. PromptId={PromptId}, Approved={Approved}.",
+            prompt.Id,
+            response.Approved);
 
         lock (_stateGate)
         {
@@ -465,6 +524,9 @@ public sealed partial class TerminalSessionService(
             {
                 PendingElevationPrompt = null;
                 _elevationResponse = null;
+                logger.LogDebug(
+                    "Terminal elevation prompt cleared after response. PromptId={PromptId}.",
+                    prompt.Id);
             }
         }
         NotifyStateChanged();
@@ -477,13 +539,13 @@ public sealed partial class TerminalSessionService(
         var session = _activeSession;
         if (session is null)
         {
-            ClearPendingElevationPrompt();
+            ClearPendingElevationPromptAndNotify("disconnect with no active session");
             return;
         }
 
         _activeSession = null;
         ActiveConnection = null;
-        ClearPendingElevationPrompt();
+        ClearPendingElevationPrompt("disconnect");
         lock (_historyGate)
         {
             _activeCommand?.Completion.TrySetResult(_activeCommand.BuildResult(
@@ -523,7 +585,7 @@ public sealed partial class TerminalSessionService(
             var session = _activeSession;
             _activeSession = null;
             ActiveConnection = null;
-            ClearPendingElevationPrompt();
+            ClearPendingElevationPrompt("terminal exited");
             await session.DisposeAsync();
             NotifyStateChanged();
         }
@@ -578,14 +640,32 @@ public sealed partial class TerminalSessionService(
         }
     }
 
-    private void ClearPendingElevationPrompt()
+    private bool HasPendingElevationPrompt()
     {
         lock (_stateGate)
+            return PendingElevationPrompt is not null || _elevationResponse is not null;
+    }
+
+    private void ClearPendingElevationPromptAndNotify(string reason)
+    {
+        if (ClearPendingElevationPrompt(reason))
+            NotifyStateChanged();
+    }
+
+    private bool ClearPendingElevationPrompt(string reason)
+    {
+        var changed = false;
+        lock (_stateGate)
         {
+            changed = PendingElevationPrompt is not null || _elevationResponse is not null;
             PendingElevationPrompt = null;
             _elevationResponse?.TrySetResult(new TerminalElevationResponse(Approved: false, Password: null));
             _elevationResponse = null;
         }
+
+        if (changed)
+            logger.LogDebug("Terminal elevation prompt cleared: {Reason}.", reason);
+        return changed;
     }
 
     private void AppendRecentOutput(TerminalOutput output)
@@ -796,19 +876,56 @@ public sealed partial class TerminalSessionService(
 
     private static string BuildPosixCommandWrapper(string id, string command)
     {
-        var delimiter = $"{SentinelPrefix}SCRIPT_{id}__";
         var script = NormalizeNewlines(command);
+        var delimiter = CreateHereDocumentDelimiter(id, script);
+        var runScriptLine = string.Join(" ", new[]
+        {
+            "printf '\\n%s%s%s\\n' '__SHELLMATE_START_' \"$__sm_id\" '__';",
+            "if [ \"$__sm_prepare\" -ne 0 ]; then",
+            "printf '%s\\n' 'Shellmate failed to stage command script.' >&2; __sm_code=$__sm_prepare;",
+            "elif [ \"$(head -c 2 \"$__sm_script\" 2>/dev/null)\" = '#!' ]; then",
+            "\"$__sm_script\"; __sm_code=$?;",
+            "else",
+            "sh \"$__sm_script\"; __sm_code=$?;",
+            "fi;",
+            "rm -f \"$__sm_script\";",
+            "printf '\\n%s%s%s:%s\\n' '__SHELLMATE_END_' \"$__sm_id\" '__' \"$__sm_code\""
+        });
 
         return string.Join(
             "\n",
             $"__sm_id='{id}'",
-            "printf '\\n%s%s%s\\n' '__SHELLMATE_START_' \"$__sm_id\" '__'",
-            $"sh <<'{delimiter}'",
+            "umask 077",
+            "__sm_script=\"$(mktemp \"${TMPDIR:-/tmp}/shellmate-$__sm_id.XXXXXX\" 2>/dev/null)\" || { __sm_script=\"${TMPDIR:-/tmp}/shellmate-$__sm_id.sh\"; rm -f \"$__sm_script\"; }",
+            $"cat >\"$__sm_script\" <<'{delimiter}'",
             script,
             delimiter,
-            "__sm_code=$?",
-            "printf '\\n%s%s%s:%s\\n' '__SHELLMATE_END_' \"$__sm_id\" '__' \"$__sm_code\"",
+            "__sm_prepare=$?",
+            "chmod 700 \"$__sm_script\" 2>/dev/null || true",
+            runScriptLine,
             string.Empty);
+    }
+
+    private static string CreateHereDocumentDelimiter(string id, string script)
+    {
+        var baseDelimiter = $"{SentinelPrefix}SCRIPT_{id}__";
+        var delimiter = baseDelimiter;
+        var suffix = 0;
+        while (ContainsExactLine(script, delimiter))
+            delimiter = $"{baseDelimiter}{++suffix}__";
+
+        return delimiter;
+    }
+
+    private static bool ContainsExactLine(string text, string candidate)
+    {
+        foreach (var line in text.Split('\n'))
+        {
+            if (line == candidate)
+                return true;
+        }
+
+        return false;
     }
 
     private static string EscapePowerShellSingleQuoted(string value) =>
@@ -819,19 +936,33 @@ public sealed partial class TerminalSessionService(
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n');
 
-    private static bool DetectPasswordPrompt(string text)
+    private static bool TryDetectPasswordPrompt(string text, out string promptText)
     {
-        var clean = StripAnsi(text);
-        var tail = clean.Length > 800 ? clean[^800..] : clean;
-        return PasswordPromptRegex().IsMatch(tail);
+        promptText = string.Empty;
+        var clean = StripAnsi(SanitizeCommandOutput(text));
+        if (string.IsNullOrEmpty(clean))
+            return false;
+
+        var tail = clean.Length > 2_000 ? clean[^2_000..] : clean;
+        var match = PasswordPromptTailRegex().Match(tail);
+        if (!match.Success)
+            return false;
+
+        promptText = TrimTerminalPromptTail(match.Groups["prompt"].Value).Trim();
+        return !string.IsNullOrWhiteSpace(promptText);
     }
 
-    private static string LastPromptLine(string text)
+    private static string TrimTerminalPromptTail(string text)
     {
-        var clean = StripAnsi(text).Replace("\r", string.Empty);
-        var lines = clean.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return lines.LastOrDefault() ?? "Password required.";
+        var end = text.Length;
+        while (end > 0 && IsTerminalPromptTailCharacter(text[end - 1]))
+            end--;
+
+        return end == text.Length ? text : text[..end];
     }
+
+    private static bool IsTerminalPromptTailCharacter(char ch) =>
+        char.IsWhiteSpace(ch) || char.IsControl(ch);
 
     private static string CleanTerminalText(string text) =>
         SentinelLineRegex().Replace(StripAnsi(text), string.Empty).Trim();
@@ -945,17 +1076,26 @@ public sealed partial class TerminalSessionService(
     [GeneratedRegex(@"\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\a]*(?:\a|\x1B\\)|\x1B[@-_]")]
     private static partial Regex AnsiRegex();
 
-    [GeneratedRegex(@"(?i)(?:^|[\r\n])(?:\[sudo\]\s*)?password(?:\s+for\s+[^:\r\n]+)?\s*:[ \t]*\z")]
-    private static partial Regex PasswordPromptRegex();
+    [GeneratedRegex(@"(?i)(?:^|[\r\n])\s*(?<prompt>(?:\[sudo\]\s*)?password(?:\s+for\s+[^:\r\n]+)?\s*:)[\s\x00-\x1F\x7F]*\z")]
+    private static partial Regex PasswordPromptTailRegex();
 
     [GeneratedRegex(@"(?m)^.*__SHELLMATE_(?:START|END)_[A-Fa-f0-9]+__.*(?:\r?\n)?")]
     private static partial Regex SentinelLineRegex();
+
+    private enum ElevationPromptReservation
+    {
+        Reserved,
+        AlreadyPending,
+        TooManyAttempts,
+        Completed
+    }
 
     private sealed class ShellCommandExecution
     {
         private readonly object _gate = new();
         private readonly StringBuilder _raw = new();
         private int _elevationPromptAttempts;
+        private bool _elevationPromptPending;
         private bool _seenStart;
 
         private ShellCommandExecution(Guid id, string command, TerminalShellKind shellKind)
@@ -979,6 +1119,8 @@ public sealed partial class TerminalSessionService(
         public TaskCompletionSource<TerminalCommandResult> Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public bool IsCompleted => Completion.Task.IsCompleted;
+
         public bool ShouldCheckElevationPrompt
         {
             get
@@ -997,6 +1139,15 @@ public sealed partial class TerminalSessionService(
             }
         }
 
+        public string VisibleOutputTail(int maxChars)
+        {
+            lock (_gate)
+            {
+                var output = ExtractVisibleOutput(_raw.ToString(), StartToken, EndPrefix, includeIncomplete: true).Output;
+                return output.Length <= maxChars ? output : output[^maxChars..];
+            }
+        }
+
         public static ShellCommandExecution Create(string command, TerminalShellKind shellKind) =>
             new(Guid.NewGuid(), command, shellKind);
 
@@ -1009,20 +1160,39 @@ public sealed partial class TerminalSessionService(
             }
         }
 
-        public bool TryReserveElevationPrompt(int maxAttempts, out int attempt)
+        public bool TryComplete(TerminalCommandResult result) =>
+            Completion.TrySetResult(result);
+
+        public TerminalCommandResult CurrentResultOr(TerminalCommandResult fallback) =>
+            Completion.Task.IsCompletedSuccessfully ? Completion.Task.Result : fallback;
+
+        public ElevationPromptReservation TryReserveElevationPrompt(int maxAttempts, out int attempt)
         {
             lock (_gate)
             {
-                if (Completion.Task.IsCompleted || _elevationPromptAttempts >= maxAttempts)
+                attempt = _elevationPromptAttempts;
+                if (Completion.Task.IsCompleted)
+                    return ElevationPromptReservation.Completed;
+
+                if (_elevationPromptPending)
+                    return ElevationPromptReservation.AlreadyPending;
+
+                if (_elevationPromptAttempts >= maxAttempts)
                 {
-                    attempt = _elevationPromptAttempts;
-                    return false;
+                    return ElevationPromptReservation.TooManyAttempts;
                 }
 
                 _elevationPromptAttempts++;
+                _elevationPromptPending = true;
                 attempt = _elevationPromptAttempts;
-                return true;
+                return ElevationPromptReservation.Reserved;
             }
+        }
+
+        public void MarkElevationPromptHandled()
+        {
+            lock (_gate)
+                _elevationPromptPending = false;
         }
 
         public bool TryBuildCompletedResult(int maxOutputChars, out TerminalCommandResult result)

@@ -1,6 +1,7 @@
 @inherits LayoutComponentBase
 @implements IDisposable
 @inject ITerminalSessionService TerminalSession
+@inject ILogger<MainLayout> Logger
 
 <div class="page">
     <div class="sidebar">
@@ -72,14 +73,15 @@
         {
             await _elevationPasswordInput.FocusAsync();
         }
-        catch
+        catch (Exception ex)
         {
+            Logger.LogDebug(ex, "Failed to focus terminal elevation password input.");
         }
     }
 
     private void OnTerminalStateChanged()
     {
-        _ = InvokeAsync(() =>
+        var updateTask = InvokeAsync(() =>
         {
             var nextPrompt = TerminalSession.PendingElevationPrompt;
             if (_elevationPrompt?.Id != nextPrompt?.Id)
@@ -91,6 +93,11 @@
             _elevationPrompt = nextPrompt;
             StateHasChanged();
         });
+        _ = updateTask.ContinueWith(
+            task => Logger.LogDebug(task.Exception, "Failed to apply terminal elevation prompt state change."),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private async Task ApproveElevationPrompt()

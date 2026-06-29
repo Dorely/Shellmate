@@ -31,7 +31,7 @@ public sealed class AssistantShellTools(IOptions<AgentOptions> options)
             AIFunctionFactory.Create(
                 method: (string command, int? timeoutSeconds = null) => RunShellCommandAsync(context, command, timeoutSeconds),
                 name: "run_shell_command",
-                description: "Execute one command or multi-line script in the currently connected terminal shell and return bounded JSON output. The tool cannot connect to a terminal. Use timeoutSeconds only when the command is expected to take longer than the default."),
+                description: "Execute one command or multi-line script in the currently connected terminal shell and return bounded JSON output. The tool cannot connect to a terminal. If sudo is needed, start with sudo -v or one short standalone sudo command with a timeout long enough for the user to answer the Shellmate password prompt, then run diagnostics separately after sudo is available. Use timeoutSeconds only when the command is expected to take longer than the default."),
         };
     }
 
