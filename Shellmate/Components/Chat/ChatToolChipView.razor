@@ -69,21 +69,41 @@
         }
     }
 
-    private string StateClass => Chip.Error is not null
-        ? "chat-chip-error"
-        : Chip.Completed
-            ? "chat-chip-ok"
-            : Chip.ArgumentsComplete
-                ? "chat-chip-running"
-                : "chat-chip-pending";
+    private string StateClass
+    {
+        get
+        {
+            var shellResult = TryParseShellResult();
+            if (shellResult is not null && IsRunningStatus(shellResult.Status))
+                return "chat-chip-running";
 
-    private string IconText => Chip.Error is not null
-        ? "x"
-        : Chip.Completed
-            ? "ok"
-            : Chip.ArgumentsComplete
-                ? "run"
-                : "...";
+            return Chip.Error is not null
+                ? "chat-chip-error"
+                : Chip.Completed
+                    ? "chat-chip-ok"
+                    : Chip.ArgumentsComplete
+                        ? "chat-chip-running"
+                        : "chat-chip-pending";
+        }
+    }
+
+    private string IconText
+    {
+        get
+        {
+            var shellResult = TryParseShellResult();
+            if (shellResult is not null && IsRunningStatus(shellResult.Status))
+                return "run";
+
+            return Chip.Error is not null
+                ? "x"
+                : Chip.Completed
+                    ? "ok"
+                    : Chip.ArgumentsComplete
+                        ? "run"
+                        : "...";
+        }
+    }
 
     private string PendingText => Chip.ArgumentsComplete ? "running..." : "receiving args...";
 
@@ -93,29 +113,27 @@
             : $"{durationMs:0}ms";
 
     private RenderFragment RenderShellResult(ShellToolResult result) => __builder =>
-    {
-        <div class="chat-chip-section">status</div>
-        <div class="chat-chip-meta">
+        {
+            <div class="chat-chip-section">status</div>
+            <div class="chat-chip-meta">
+            <span class="@StatusClass(result.Status)">@FormatStatus(result.Status)</span>
             <span class="@ExitClass(result.ExitCode)">@FormatExitCode(result.ExitCode)</span>
-            @if (result.TimedOut)
-            {
-                <span class="chat-chip-meta-pill chat-chip-meta-error">timed out</span>
-            }
-            @if (result.Cancelled)
-            {
-                <span class="chat-chip-meta-pill chat-chip-meta-error">cancelled</span>
-            }
             @if (result.OutputTruncated)
             {
                 <span class="chat-chip-meta-pill chat-chip-meta-warn">truncated</span>
             }
         </div>
+        @if (!string.IsNullOrWhiteSpace(result.Message))
+        {
+            <div class="chat-chip-section">message</div>
+            <pre class="chat-chip-pre">@result.Message</pre>
+        }
         @if (!string.IsNullOrWhiteSpace(result.Error) && !string.Equals(result.Error, Chip.Error, StringComparison.Ordinal))
         {
             <div class="chat-chip-section">command error</div>
             <pre class="chat-chip-pre chat-chip-pre-error">@result.Error</pre>
         }
-        <div class="chat-chip-section">output</div>
+        <div class="chat-chip-section">@(IsRunningStatus(result.Status) ? "partial output" : "output")</div>
         <pre class="chat-chip-pre">@result.Output</pre>
     };
 
@@ -137,11 +155,11 @@
 
             return new ShellToolResult(
                 command,
+                GetString(root, "status") ?? "Completed",
                 GetInt32(root, "exitCode"),
-                GetBoolean(root, "timedOut"),
-                GetBoolean(root, "cancelled"),
                 GetString(root, "output") ?? string.Empty,
                 GetBoolean(root, "outputTruncated"),
+                GetString(root, "message"),
                 GetString(root, "error"));
         }
         catch
@@ -201,6 +219,20 @@
     private static string FormatExitCode(int? exitCode) =>
         exitCode is null ? "exit n/a" : $"exit {exitCode}";
 
+    private static string FormatStatus(string status) => status;
+
+    private static bool IsRunningStatus(string status) =>
+        string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase);
+
+    private static string StatusClass(string status) => status switch
+    {
+        var value when string.Equals(value, "Completed", StringComparison.OrdinalIgnoreCase) => "chat-chip-meta-pill chat-chip-meta-ok",
+        var value when string.Equals(value, "Running", StringComparison.OrdinalIgnoreCase) => "chat-chip-meta-pill chat-chip-meta-running",
+        var value when string.Equals(value, "Cancelled", StringComparison.OrdinalIgnoreCase) => "chat-chip-meta-pill chat-chip-meta-error",
+        var value when string.Equals(value, "Failed", StringComparison.OrdinalIgnoreCase) => "chat-chip-meta-pill chat-chip-meta-error",
+        _ => "chat-chip-meta-pill"
+    };
+
     private static string ExitClass(int? exitCode) => exitCode switch
     {
         0 => "chat-chip-meta-pill chat-chip-meta-ok",
@@ -210,10 +242,10 @@
 
     private sealed record ShellToolResult(
         string Command,
+        string Status,
         int? ExitCode,
-        bool TimedOut,
-        bool Cancelled,
         string Output,
         bool OutputTruncated,
+        string? Message,
         string? Error);
 }

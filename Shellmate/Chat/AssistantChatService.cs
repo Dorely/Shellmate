@@ -359,7 +359,7 @@ public sealed class AssistantChatService(
                     toolError,
                     stopwatch.Elapsed.TotalMilliseconds);
 
-                if (cancellationToken.IsCancellationRequested || IsCancelledToolResult(toolResult))
+                if (cancellationToken.IsCancellationRequested)
                 {
                     yield return new AssistantTurnError("Cancelled.", Cancelled: true);
                     yield break;
@@ -500,24 +500,20 @@ public sealed class AssistantChatService(
         if (TryGetNonEmptyString(root, "error", out var error))
             return error;
 
-        if (TryGetBoolean(root, "timedOut") == true)
-            return "Command timed out.";
+        var status = TryGetString(root, "status");
+        if (string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase))
+            return null;
 
-        if (TryGetBoolean(root, "cancelled") == true)
-            return "Command was cancelled.";
+        if (string.Equals(status, "Cancelled", StringComparison.OrdinalIgnoreCase))
+            return TryGetString(root, "message") ?? "Command was cancelled.";
+
+        if (string.Equals(status, "Failed", StringComparison.OrdinalIgnoreCase))
+            return TryGetString(root, "message") ?? "Command failed.";
 
         if (TryGetInt32(root, "exitCode") is { } exitCode && exitCode != 0)
             return $"Command exited with code {exitCode}.";
 
         return null;
-    }
-
-    private static bool IsCancelledToolResult(string? toolResult)
-    {
-        if (string.IsNullOrWhiteSpace(toolResult) || !TryReadJsonObject(toolResult, out var root))
-            return false;
-
-        return TryGetBoolean(root, "cancelled") == true;
     }
 
     private static bool TryReadJsonObject(string json, out JsonElement root)
@@ -548,17 +544,13 @@ public sealed class AssistantChatService(
         return !string.IsNullOrWhiteSpace(value);
     }
 
-    private static bool? TryGetBoolean(JsonElement root, string propertyName)
+    private static string? TryGetString(JsonElement root, string propertyName)
     {
-        if (!root.TryGetProperty(propertyName, out var property))
+        if (!root.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
             return null;
 
-        return property.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            _ => null
-        };
+        var value = property.GetString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static int? TryGetInt32(JsonElement root, string propertyName)

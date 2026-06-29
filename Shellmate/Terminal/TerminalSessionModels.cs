@@ -50,9 +50,20 @@ public sealed record TerminalSnapshot(
     string? ConnectionName,
     TerminalConnectionKind? ConnectionKind,
     TerminalShellDescriptor? Shell,
+    TerminalActiveCommandSnapshot? ActiveCommand,
     IReadOnlyList<TerminalCommandRecord> RecentCommands,
     string RecentOutput,
     bool RecentOutputTruncated);
+
+public sealed record TerminalActiveCommandSnapshot(
+    Guid Id,
+    string Command,
+    DateTime StartedAt,
+    double ElapsedSeconds,
+    TerminalCommandStatus Status,
+    string Output,
+    bool OutputTruncated,
+    string? Message);
 
 public sealed record TerminalCommandRecord(
     Guid Id,
@@ -61,10 +72,10 @@ public sealed record TerminalCommandRecord(
     DateTime StartedAt,
     DateTime? CompletedAt,
     int? ExitCode,
-    bool TimedOut,
-    bool Cancelled,
+    TerminalCommandStatus Status,
     string Output,
     bool OutputTruncated,
+    string? Message,
     string? Error);
 
 public enum TerminalCommandOrigin
@@ -73,17 +84,49 @@ public enum TerminalCommandOrigin
     Assistant
 }
 
+public enum TerminalCommandStatus
+{
+    Running,
+    Completed,
+    Failed,
+    Cancelled
+}
+
 public sealed record TerminalCommandResult(
     Guid Id,
     string Command,
     DateTime StartedAt,
-    DateTime CompletedAt,
+    DateTime? CompletedAt,
     int? ExitCode,
-    bool TimedOut,
-    bool Cancelled,
+    TerminalCommandStatus Status,
     string Output,
     bool OutputTruncated,
+    string? Message,
     string? Error);
+
+public sealed record TerminalResetResult(
+    TerminalResetStatus Status,
+    bool Reconnected,
+    string Message,
+    TerminalSnapshot Snapshot,
+    TerminalHostKeyPrompt? HostKeyPrompt = null)
+{
+    public static TerminalResetResult ReconnectedSnapshot(TerminalSnapshot snapshot) =>
+        new(TerminalResetStatus.Reconnected, Reconnected: true, "Terminal connection reset and reconnected.", snapshot);
+
+    public static TerminalResetResult HostKeyRequired(TerminalHostKeyPrompt prompt, TerminalSnapshot snapshot) =>
+        new(TerminalResetStatus.HostKeyRequired, Reconnected: false, "SSH host key trust is required before reconnecting.", snapshot, prompt);
+
+    public static TerminalResetResult Failed(string message, TerminalSnapshot snapshot) =>
+        new(TerminalResetStatus.Failed, Reconnected: false, message, snapshot);
+}
+
+public enum TerminalResetStatus
+{
+    Reconnected,
+    HostKeyRequired,
+    Failed
+}
 
 public sealed record TerminalElevationPrompt(
     Guid Id,

@@ -34,6 +34,7 @@ public sealed partial class TerminalSessionService(
     private Task? _pumpTask;
     private ShellCommandExecution? _activeCommand;
     private TaskCompletionSource<TerminalElevationResponse>? _elevationResponse;
+    private TerminalSize _lastSize = TerminalSize.Default;
     private int _replayCharacterCount;
     private bool _disposed;
 
@@ -48,11 +49,13 @@ public sealed partial class TerminalSessionService(
         lock (_historyGate)
         {
             var recentOutput = CleanTerminalText(_recentOutput.ToString());
+            var activeCommand = _activeCommand?.BuildActiveSnapshot(EffectiveCommandOutputMaxChars());
             return new TerminalSnapshot(
                 IsConnected,
                 ActiveConnection?.Name,
                 ActiveConnection?.Kind,
                 ActiveConnection is null ? null : ResolveShellDescriptor(ActiveConnection),
+                activeCommand,
                 _recentCommands.ToList(),
                 recentOutput,
                 _recentOutput.Length >= EffectiveRecentOutputMaxChars());
@@ -100,60 +103,7 @@ public sealed partial class TerminalSessionService(
         {
             ThrowIfDisposed();
             await DisconnectCoreAsync(cancellationToken);
-
-            using var scope = scopeFactory.CreateScope();
-            var connections = scope.ServiceProvider.GetRequiredService<ITerminalConnectionRepository>();
-            var connectionService = scope.ServiceProvider.GetRequiredService<ITerminalConnectionService>();
-            var secrets = scope.ServiceProvider.GetRequiredService<ISecretStore>();
-            var connection = await connections.GetByIdAsync(connectionId, cancellationToken);
-            if (connection is null)
-                return TerminalConnectResult.Error("Connection was not found.");
-
-            await WriteUiOutputAsync(
-                new TerminalOutput(TerminalOutputKind.Status, $"Connecting to {connection.Name}..."),
-                cancellationToken);
-
-            ITerminalBackendSession session;
-            if (connection.Kind == TerminalConnectionKind.LocalShell)
-            {
-                session = await LocalTerminalSession.StartAsync(connection, size, logger, cancellationToken);
-            }
-            else
-            {
-                var resolved = new ResolvedSshConnection(
-                    connection,
-                    await secrets.GetAsync(ConnectionSecretNames.SshPassword(connection.Id), cancellationToken),
-                    await secrets.GetAsync(ConnectionSecretNames.SshPrivateKeyPassphrase(connection.Id), cancellationToken));
-                var sshResult = await SshTerminalSession.StartAsync(
-                    resolved,
-                    size,
-                    trustPresentedHostKey,
-                    logger,
-                    cancellationToken);
-
-                if (sshResult.HostKeyPrompt is not null)
-                    return TerminalConnectResult.HostKeyRequired(sshResult.HostKeyPrompt);
-                if (sshResult.ErrorMessage is not null)
-                    return TerminalConnectResult.Error(sshResult.ErrorMessage);
-                if (sshResult.Session is null)
-                    return TerminalConnectResult.Error("SSH session did not start.");
-
-                if (sshResult.Trust is not null)
-                    await connectionService.TrustHostKeyAsync(connection.Id, sshResult.Trust, cancellationToken);
-
-                session = sshResult.Session;
-            }
-
-            _activeSession = session;
-            ActiveConnection = connection;
-            _pumpCts = new CancellationTokenSource();
-            _pumpTask = Task.Run(() => PumpAndRelayOutputAsync(session, _pumpCts.Token), CancellationToken.None);
-
-            await WriteUiOutputAsync(
-                new TerminalOutput(TerminalOutputKind.Status, $"Connected to {connection.Name}."),
-                cancellationToken);
-            NotifyStateChanged();
-            return TerminalConnectResult.Success();
+            return await ConnectCoreAsync(connectionId, size, trustPresentedHostKey, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -175,6 +125,69 @@ public sealed partial class TerminalSessionService(
         await _activeSession.SendAsync(data, cancellationToken);
     }
 
+    private async Task<TerminalConnectResult> ConnectCoreAsync(
+        Guid connectionId,
+        TerminalSize size,
+        bool trustPresentedHostKey,
+        CancellationToken cancellationToken)
+    {
+        _lastSize = size;
+
+        using var scope = scopeFactory.CreateScope();
+        var connections = scope.ServiceProvider.GetRequiredService<ITerminalConnectionRepository>();
+        var connectionService = scope.ServiceProvider.GetRequiredService<ITerminalConnectionService>();
+        var secrets = scope.ServiceProvider.GetRequiredService<ISecretStore>();
+        var connection = await connections.GetByIdAsync(connectionId, cancellationToken);
+        if (connection is null)
+            return TerminalConnectResult.Error("Connection was not found.");
+
+        await WriteUiOutputAsync(
+            new TerminalOutput(TerminalOutputKind.Status, $"Connecting to {connection.Name}..."),
+            cancellationToken);
+
+        ITerminalBackendSession session;
+        if (connection.Kind == TerminalConnectionKind.LocalShell)
+        {
+            session = await LocalTerminalSession.StartAsync(connection, size, logger, cancellationToken);
+        }
+        else
+        {
+            var resolved = new ResolvedSshConnection(
+                connection,
+                await secrets.GetAsync(ConnectionSecretNames.SshPassword(connection.Id), cancellationToken),
+                await secrets.GetAsync(ConnectionSecretNames.SshPrivateKeyPassphrase(connection.Id), cancellationToken));
+            var sshResult = await SshTerminalSession.StartAsync(
+                resolved,
+                size,
+                trustPresentedHostKey,
+                logger,
+                cancellationToken);
+
+            if (sshResult.HostKeyPrompt is not null)
+                return TerminalConnectResult.HostKeyRequired(sshResult.HostKeyPrompt);
+            if (sshResult.ErrorMessage is not null)
+                return TerminalConnectResult.Error(sshResult.ErrorMessage);
+            if (sshResult.Session is null)
+                return TerminalConnectResult.Error("SSH session did not start.");
+
+            if (sshResult.Trust is not null)
+                await connectionService.TrustHostKeyAsync(connection.Id, sshResult.Trust, cancellationToken);
+
+            session = sshResult.Session;
+        }
+
+        _activeSession = session;
+        ActiveConnection = connection;
+        _pumpCts = new CancellationTokenSource();
+        _pumpTask = Task.Run(() => PumpAndRelayOutputAsync(session, _pumpCts.Token), CancellationToken.None);
+
+        await WriteUiOutputAsync(
+            new TerminalOutput(TerminalOutputKind.Status, $"Connected to {connection.Name}."),
+            cancellationToken);
+        NotifyStateChanged();
+        return TerminalConnectResult.Success();
+    }
+
     public async Task<TerminalCommandResult> ExecuteCommandAsync(
         string command,
         TimeSpan timeout,
@@ -190,6 +203,14 @@ public sealed partial class TerminalSessionService(
             var connection = ActiveConnection;
             if (session is null || connection is null)
                 return DisconnectedCommandResult(command, "No terminal is connected.");
+
+            if (TryGetActiveRunningCommand(out var activeCommand))
+            {
+                return activeCommand.BuildRunningResult(
+                    EffectiveCommandOutputMaxChars(),
+                    "Command was not sent because another assistant command is still running.");
+            }
+
             if (HasPendingElevationPrompt())
             {
                 return DisconnectedCommandResult(
@@ -206,10 +227,10 @@ public sealed partial class TerminalSessionService(
                 execution.StartedAt,
                 CompletedAt: null,
                 ExitCode: null,
-                TimedOut: false,
-                Cancelled: false,
+                Status: TerminalCommandStatus.Running,
                 Output: string.Empty,
                 OutputTruncated: false,
+                Message: "Command started.",
                 Error: null));
 
             lock (_historyGate)
@@ -225,6 +246,7 @@ public sealed partial class TerminalSessionService(
                 var result = await execution.Completion.Task.WaitAsync(timeoutCts.Token);
                 ClearPendingElevationPromptAndNotify("command completed");
                 UpdateCommandRecord(result);
+                ClearActiveCommand(execution);
                 return result;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -232,8 +254,8 @@ public sealed partial class TerminalSessionService(
                 var result = execution.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
-                    timedOut: false,
-                    cancelled: true,
+                    status: TerminalCommandStatus.Cancelled,
+                    message: "Command was cancelled.",
                     error: "Command was cancelled.");
                 var completedByThisPath = execution.TryComplete(result);
                 ClearPendingElevationPromptAndNotify("command cancelled");
@@ -241,31 +263,22 @@ public sealed partial class TerminalSessionService(
                     await InterruptCommandAsync(session);
                 result = execution.CurrentResultOr(result);
                 UpdateCommandRecord(result);
+                ClearActiveCommand(execution);
                 return result;
             }
             catch (OperationCanceledException)
             {
-                var result = execution.BuildResult(
+                var result = execution.CurrentResultOr(execution.BuildRunningResult(
                     EffectiveCommandOutputMaxChars(),
-                    exitCode: null,
-                    timedOut: true,
-                    cancelled: false,
-                    error: $"Command timed out after {timeout.TotalSeconds:0} seconds.");
-                var completedByThisPath = execution.TryComplete(result);
-                ClearPendingElevationPromptAndNotify("command timed out");
-                if (completedByThisPath)
-                    await InterruptCommandAsync(session);
-                result = execution.CurrentResultOr(result);
+                    $"Command still running after {timeout.TotalSeconds:0} seconds."));
                 UpdateCommandRecord(result);
-                return result;
-            }
-            finally
-            {
-                lock (_historyGate)
+                if (result.Status != TerminalCommandStatus.Running)
                 {
-                    if (ReferenceEquals(_activeCommand, execution))
-                        _activeCommand = null;
+                    ClearPendingElevationPromptAndNotify("command completed after timeout race");
+                    ClearActiveCommand(execution);
                 }
+
+                return result;
             }
         }
         finally
@@ -276,6 +289,8 @@ public sealed partial class TerminalSessionService(
 
     public async Task ResizeAsync(TerminalSize size, CancellationToken cancellationToken = default)
     {
+        _lastSize = size;
+
         if (_activeSession is null)
             return;
 
@@ -293,6 +308,52 @@ public sealed partial class TerminalSessionService(
             response.Approved ? "approved" : "denied");
         completion?.TrySetResult(response);
         return Task.CompletedTask;
+    }
+
+    public async Task<TerminalResetResult> ResetConnectionAsync(
+        string? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfDisposed();
+
+            var connectionId = ActiveConnection?.Id;
+            if (connectionId is null)
+                return TerminalResetResult.Failed("No terminal is connected.", GetSnapshot());
+
+            var message = string.IsNullOrWhiteSpace(reason)
+                ? "Resetting terminal connection..."
+                : $"Resetting terminal connection: {reason.Trim()}";
+            await WriteUiOutputAsync(new TerminalOutput(TerminalOutputKind.Status, message), cancellationToken);
+
+            var size = _lastSize;
+            await DisconnectCoreAsync(cancellationToken);
+
+            TerminalConnectResult connectResult;
+            try
+            {
+                connectResult = await ConnectCoreAsync(connectionId.Value, size, trustPresentedHostKey: false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Terminal reset reconnect failed.");
+                return TerminalResetResult.Failed(ex.Message, GetSnapshot());
+            }
+
+            if (connectResult.Connected)
+                return TerminalResetResult.ReconnectedSnapshot(GetSnapshot());
+
+            if (connectResult.HostKeyPrompt is not null)
+                return TerminalResetResult.HostKeyRequired(connectResult.HostKeyPrompt, GetSnapshot());
+
+            return TerminalResetResult.Failed(connectResult.ErrorMessage ?? "Terminal reconnect failed.", GetSnapshot());
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
@@ -341,6 +402,9 @@ public sealed partial class TerminalSessionService(
         {
             await foreach (var output in backendOutput.Reader.ReadAllAsync(CancellationToken.None))
             {
+                if (!IsActiveSession(session))
+                    continue;
+
                 PublishOutput(output);
                 await RecordOutputAsync(output, cancellationToken);
             }
@@ -354,7 +418,7 @@ public sealed partial class TerminalSessionService(
         }
         finally
         {
-            await MarkExitedAsync();
+            await MarkExitedAsync(session);
         }
     }
 
@@ -382,8 +446,8 @@ public sealed partial class TerminalSessionService(
             var repeatedPromptResult = activeCommand.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
-                timedOut: false,
-                cancelled: true,
+                status: TerminalCommandStatus.Cancelled,
+                message: "Elevation prompt repeated too many times.",
                 error: "Elevation prompt repeated too many times.");
             var completedByThisPath = activeCommand.TryComplete(repeatedPromptResult);
             logger.LogWarning(
@@ -391,7 +455,11 @@ public sealed partial class TerminalSessionService(
                 activeCommand.Id);
             ClearPendingElevationPromptAndNotify("repeated elevation prompt");
             if (completedByThisPath)
+            {
                 await InterruptCommandAsync(_activeSession);
+                UpdateCommandRecord(repeatedPromptResult);
+                ClearActiveCommand(activeCommand);
+            }
             return;
         }
 
@@ -408,7 +476,13 @@ public sealed partial class TerminalSessionService(
 
         if (activeCommand.TryBuildCompletedResult(EffectiveCommandOutputMaxChars(), out var completed))
         {
-            activeCommand.TryComplete(completed);
+            if (activeCommand.TryComplete(completed))
+            {
+                ClearPendingElevationPromptAndNotify("command completed");
+                UpdateCommandRecord(completed);
+                ClearActiveCommand(activeCommand);
+            }
+
             return;
         }
     }
@@ -422,12 +496,18 @@ public sealed partial class TerminalSessionService(
         var session = _activeSession;
         if (session is null)
         {
-            execution.TryComplete(execution.BuildResult(
+            var result = execution.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
-                timedOut: false,
-                cancelled: true,
-                error: "The command requested a password, but no terminal session is available."));
+                status: TerminalCommandStatus.Cancelled,
+                message: "The command requested a password, but no terminal session is available.",
+                error: "The command requested a password, but no terminal session is available.");
+            if (execution.TryComplete(result))
+            {
+                UpdateCommandRecord(result);
+                ClearActiveCommand(execution);
+            }
+
             execution.MarkElevationPromptHandled();
             return;
         }
@@ -451,24 +531,34 @@ public sealed partial class TerminalSessionService(
             }
 
             await InterruptCommandAsync(session);
-            execution.TryComplete(execution.BuildResult(
+            var result = execution.BuildResult(
                 EffectiveCommandOutputMaxChars(),
                 exitCode: null,
-                timedOut: false,
-                cancelled: true,
-                error: "Elevation prompt denied by user."));
+                status: TerminalCommandStatus.Cancelled,
+                message: "Elevation prompt denied by user.",
+                error: "Elevation prompt denied by user.");
+            if (execution.TryComplete(result))
+            {
+                UpdateCommandRecord(result);
+                ClearActiveCommand(execution);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             if (!execution.IsCompleted)
             {
                 await InterruptCommandAsync(session);
-                execution.TryComplete(execution.BuildResult(
+                var result = execution.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
-                    timedOut: false,
-                    cancelled: true,
-                    error: "Elevation prompt was cancelled."));
+                    status: TerminalCommandStatus.Cancelled,
+                    message: "Elevation prompt was cancelled.",
+                    error: "Elevation prompt was cancelled.");
+                if (execution.TryComplete(result))
+                {
+                    UpdateCommandRecord(result);
+                    ClearActiveCommand(execution);
+                }
             }
         }
         catch (Exception ex)
@@ -477,12 +567,17 @@ public sealed partial class TerminalSessionService(
             if (!execution.IsCompleted)
             {
                 await InterruptCommandAsync(session);
-                execution.TryComplete(execution.BuildResult(
+                var result = execution.BuildResult(
                     EffectiveCommandOutputMaxChars(),
                     exitCode: null,
-                    timedOut: false,
-                    cancelled: true,
-                    error: ex.Message));
+                    status: TerminalCommandStatus.Failed,
+                    message: ex.Message,
+                    error: ex.Message);
+                if (execution.TryComplete(result))
+                {
+                    UpdateCommandRecord(result);
+                    ClearActiveCommand(execution);
+                }
             }
         }
         finally
@@ -547,16 +642,26 @@ public sealed partial class TerminalSessionService(
         _activeSession = null;
         ActiveConnection = null;
         ClearPendingElevationPrompt("disconnect");
+        TerminalCommandResult? disconnectedCommand = null;
         lock (_historyGate)
         {
-            _activeCommand?.Completion.TrySetResult(_activeCommand.BuildResult(
-                EffectiveCommandOutputMaxChars(),
-                exitCode: null,
-                timedOut: false,
-                cancelled: true,
-                error: "Terminal disconnected."));
+            var activeCommand = _activeCommand;
+            if (activeCommand is not null)
+            {
+                disconnectedCommand = activeCommand.BuildResult(
+                    EffectiveCommandOutputMaxChars(),
+                    exitCode: null,
+                    status: TerminalCommandStatus.Cancelled,
+                    message: "Terminal disconnected.",
+                    error: "Terminal disconnected.");
+                activeCommand.Completion.TrySetResult(disconnectedCommand);
+            }
+
             _activeCommand = null;
         }
+        if (disconnectedCommand is not null)
+            UpdateCommandRecord(disconnectedCommand);
+
         _pumpCts?.Cancel();
 
         try
@@ -575,18 +680,36 @@ public sealed partial class TerminalSessionService(
         NotifyStateChanged();
     }
 
-    private async Task MarkExitedAsync()
+    private async Task MarkExitedAsync(ITerminalBackendSession session)
     {
         await _gate.WaitAsync();
         try
         {
-            if (_activeSession is null)
+            if (!ReferenceEquals(_activeSession, session))
                 return;
 
-            var session = _activeSession;
             _activeSession = null;
             ActiveConnection = null;
             ClearPendingElevationPrompt("terminal exited");
+            TerminalCommandResult? exitedCommand = null;
+            lock (_historyGate)
+            {
+                var activeCommand = _activeCommand;
+                if (activeCommand is not null)
+                {
+                    exitedCommand = activeCommand.BuildResult(
+                        EffectiveCommandOutputMaxChars(),
+                        exitCode: null,
+                        status: TerminalCommandStatus.Failed,
+                        message: "Terminal exited before the command completed.",
+                        error: "Terminal exited before the command completed.");
+                    activeCommand.Completion.TrySetResult(exitedCommand);
+                    _activeCommand = null;
+                }
+            }
+            if (exitedCommand is not null)
+                UpdateCommandRecord(exitedCommand);
+
             await session.DisposeAsync();
             NotifyStateChanged();
         }
@@ -595,6 +718,9 @@ public sealed partial class TerminalSessionService(
             _gate.Release();
         }
     }
+
+    private bool IsActiveSession(ITerminalBackendSession session) =>
+        ReferenceEquals(_activeSession, session);
 
     private async Task WriteUiOutputAsync(TerminalOutput output, CancellationToken cancellationToken)
     {
@@ -732,10 +858,10 @@ public sealed partial class TerminalSessionService(
             now,
             now,
             ExitCode: null,
-            TimedOut: false,
-            Cancelled: false,
+            Status: TerminalCommandStatus.Completed,
             Output: string.Empty,
             OutputTruncated: false,
+            Message: null,
             Error: null));
     }
 
@@ -743,6 +869,30 @@ public sealed partial class TerminalSessionService(
     {
         lock (_historyGate)
             AddCommandRecordLocked(record);
+    }
+
+    private bool TryGetActiveRunningCommand(out ShellCommandExecution activeCommand)
+    {
+        lock (_historyGate)
+        {
+            if (_activeCommand is { IsCompleted: false } command)
+            {
+                activeCommand = command;
+                return true;
+            }
+        }
+
+        activeCommand = null!;
+        return false;
+    }
+
+    private void ClearActiveCommand(ShellCommandExecution execution)
+    {
+        lock (_historyGate)
+        {
+            if (ReferenceEquals(_activeCommand, execution))
+                _activeCommand = null;
+        }
     }
 
     private void AddCommandRecordLocked(TerminalCommandRecord record)
@@ -764,10 +914,10 @@ public sealed partial class TerminalSessionService(
             {
                 CompletedAt = result.CompletedAt,
                 ExitCode = result.ExitCode,
-                TimedOut = result.TimedOut,
-                Cancelled = result.Cancelled,
+                Status = result.Status,
                 Output = result.Output,
                 OutputTruncated = result.OutputTruncated,
+                Message = result.Message,
                 Error = result.Error
             };
         }
@@ -782,10 +932,10 @@ public sealed partial class TerminalSessionService(
             now,
             now,
             ExitCode: null,
-            TimedOut: false,
-            Cancelled: false,
+            Status: TerminalCommandStatus.Failed,
             Output: string.Empty,
             OutputTruncated: false,
+            Message: error,
             Error: error);
     }
 
@@ -1226,25 +1376,56 @@ public sealed partial class TerminalSessionService(
                 }
 
                 var exitCode = ParseExitCode(raw, endIndex + EndPrefix.Length);
-                result = BuildResult(maxOutputChars, exitCode, timedOut: false, cancelled: false, error: null);
+                var status = exitCode is 0 ? TerminalCommandStatus.Completed : TerminalCommandStatus.Failed;
+                var message = exitCode is 0
+                    ? "Command completed."
+                    : $"Command exited with code {exitCode?.ToString() ?? "unknown"}.";
+                result = BuildResult(maxOutputChars, exitCode, status, message, error: null);
                 return true;
             }
+        }
+
+        public TerminalActiveCommandSnapshot? BuildActiveSnapshot(int maxOutputChars)
+        {
+            if (IsCompleted)
+                return null;
+
+            var output = BuildBoundedOutput(maxOutputChars, out var truncated);
+            return new TerminalActiveCommandSnapshot(
+                Id,
+                Command,
+                StartedAt,
+                Math.Max(0, (DateTime.UtcNow - StartedAt).TotalSeconds),
+                TerminalCommandStatus.Running,
+                output,
+                truncated,
+                "Command is still running.");
+        }
+
+        public TerminalCommandResult BuildRunningResult(int maxOutputChars, string message)
+        {
+            var output = BuildBoundedOutput(maxOutputChars, out var truncated);
+            return new TerminalCommandResult(
+                Id,
+                Command,
+                StartedAt,
+                null,
+                null,
+                TerminalCommandStatus.Running,
+                output,
+                truncated,
+                message,
+                null);
         }
 
         public TerminalCommandResult BuildResult(
             int maxOutputChars,
             int? exitCode,
-            bool timedOut,
-            bool cancelled,
+            TerminalCommandStatus status,
+            string? message,
             string? error)
         {
-            string raw;
-            lock (_gate)
-                raw = _raw.ToString();
-
-            var extracted = ExtractVisibleOutput(raw, StartToken, EndPrefix, includeIncomplete: true);
-            var output = SanitizeCommandOutput(CleanTerminalText(extracted.Output));
-            output = BoundCommandOutput(output, maxOutputChars, out var truncated);
+            var output = BuildBoundedOutput(maxOutputChars, out var truncated);
 
             return new TerminalCommandResult(
                 Id,
@@ -1252,11 +1433,22 @@ public sealed partial class TerminalSessionService(
                 StartedAt,
                 DateTime.UtcNow,
                 exitCode,
-                timedOut,
-                cancelled,
+                status,
                 output,
                 truncated,
+                message,
                 error);
+        }
+
+        private string BuildBoundedOutput(int maxOutputChars, out bool truncated)
+        {
+            string raw;
+            lock (_gate)
+                raw = _raw.ToString();
+
+            var extracted = ExtractVisibleOutput(raw, StartToken, EndPrefix, includeIncomplete: true);
+            var output = SanitizeCommandOutput(CleanTerminalText(extracted.Output));
+            return BoundCommandOutput(output, maxOutputChars, out truncated);
         }
 
         private static (string Output, bool FoundStart) ExtractVisibleOutput(

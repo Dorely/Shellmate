@@ -24,5 +24,8 @@ public interface ITerminalSessionService : IAsyncDisposable
         CancellationToken cancellationToken = default);
     Task ResizeAsync(TerminalSize size, CancellationToken cancellationToken = default);
     Task RespondToElevationPromptAsync(TerminalElevationResponse response);
+    Task<TerminalResetResult> ResetConnectionAsync(
+        string? reason = null,
+        CancellationToken cancellationToken = default);
     Task DisconnectAsync(CancellationToken cancellationToken = default);
 }

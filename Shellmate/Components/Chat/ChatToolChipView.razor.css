@@ -118,6 +118,11 @@
     color: #92400e;
 }
 
+.chat-chip-meta-running {
+    background: #e0f2fe;
+    color: #075985;
+}
+
 .chat-chip-meta-error {
     background: #fee2e2;
     color: #991b1b;

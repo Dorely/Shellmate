@@ -39,8 +39,9 @@ public static class AssistantPromptBuilder
             You are Shellmate's assistant inside a local desktop remote-connection manager.
 
             You help the user inspect and operate only the terminal session they have already connected.
-            You cannot create, connect, disconnect, or switch terminal sessions. If no terminal is connected,
-            explain that limitation and wait for the user to connect one.
+            You cannot create, connect, or switch terminal sessions. If no terminal is connected,
+            explain that limitation and wait for the user to connect one. You may use reset_terminal_connection
+            only to recover the current connected terminal by reconnecting the same profile.
 
             Notes:
             - Notes are user-visible Markdown-style plain text scoped to the selected workspace connection.
@@ -56,6 +57,10 @@ public static class AssistantPromptBuilder
             - Use tools for concrete terminal inspection and shell actions instead of pretending to know terminal state.
             - Before running a command, briefly say what you are about to check or do.
             - Keep working in the same turn when a tool result gives you enough information to continue.
+            - run_shell_command uses a soft observation timeout. If it returns status Running, the command is still active in the terminal; do not treat that as failure.
+            - After a Running command result, use wait_for_terminal or read_terminal_state to inspect progress before deciding what to do next.
+            - Do not run a second command while terminal context shows an active command. Wait, inspect, or reset if the terminal is clearly stuck.
+            - Use reset_terminal_connection only when waiting and terminal state indicate the terminal is locked up or unusable.
             - If a command fails, inspect the result, correct recoverable mistakes, and try again when safe.
             - Do not hide shell actions. Commands and results are visible to the user.
             - Avoid destructive, high-risk, credential-changing, or privilege-escalating actions unless the user clearly asked for them.
@@ -94,6 +99,7 @@ public static class AssistantPromptBuilder
             terminal.ConnectionName,
             terminal.ConnectionKind,
             shell = terminal.Shell,
+            activeCommand = terminal.ActiveCommand,
             shellKindCaveat = terminal.Shell?.IsAssumed == true
                 ? "Shell kind is assumed; use commands appropriate to that assumption and adapt if results contradict it."
                 : null,
@@ -104,8 +110,8 @@ public static class AssistantPromptBuilder
                 command.StartedAt,
                 command.CompletedAt,
                 command.ExitCode,
-                command.TimedOut,
-                command.Cancelled,
+                command.Status,
+                command.Message,
                 command.Error,
                 command.OutputTruncated,
                 outputPreview = Truncate(command.Output, 1000)

@@ -44,7 +44,7 @@
 | `IWorkspaceChatRuntime.cs` / `WorkspaceChatRuntime.cs` | App-process chat runtime that keeps active assistant turns alive across route changes and renderer reloads, with live-turn state and note-change notifications. |
 | `AssistantPromptBuilder.cs` | Builds the app-owned assistant system prompt with tool-use rules, visible note guidance, and dynamic terminal context. |
 | `AssistantToolRegistry.cs` | Shared assistant tool registry that combines shell and note tools for model requests and token-count previews. |
-| `AssistantShellTools.cs` | Defines shell inspection and command-execution tools over the currently connected terminal session. |
+| `AssistantShellTools.cs` | Defines shell inspection, command execution, wait, and terminal reset tools over the currently connected terminal session. |
 | `AssistantNoteTools.cs` | Defines connection-scoped note list/read/create/rename/update/delete tools resolved through the selected workspace connection. |
 | `AssistantTurnUpdate.cs` | Streaming update records consumed by the chat page: text deltas, tool-call events, completion, and turn errors. |
 
@@ -173,7 +173,7 @@
 | File | Description |
 |------|-------------|
 | `ITerminalBackendSession.cs` | Common backend interface for local PTY and SSH terminal sessions. |
-| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | App-process terminal coordinator for persistent sessions, replayable UI output subscriptions, snapshots, command execution, elevation prompts, resize, and cleanup. |
+| `ITerminalSessionService.cs` / `TerminalSessionService.cs` | App-process terminal coordinator for persistent sessions, replayable UI output subscriptions, snapshots, soft-timeout command execution, reset/reconnect, elevation prompts, resize, and cleanup. |
 | `LocalTerminalSession.cs` | Quick.PtyNet-backed local shell session with platform shell defaults and PTY cleanup. |
 | `SshTerminalSession.cs` | SSH.NET-backed shell session with password/private-key auth, `xterm-256color`, resize, and host-key trust checks. |
 | `TerminalSessionModels.cs` | Terminal DTOs for size, output, SSH host-key prompts, snapshots, command records/results, elevation prompts, connect results, and resolved SSH credentials. |

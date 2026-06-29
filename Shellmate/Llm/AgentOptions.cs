@@ -9,5 +9,6 @@ public sealed class AgentOptions
     public int TerminalRecentOutputMaxChars { get; set; } = 12_000;
     public int TerminalCommandOutputMaxChars { get; set; } = 20_000;
     public int TerminalRecentCommandCount { get; set; } = 12;
-    public int TerminalCommandTimeoutSeconds { get; set; } = 60;
+    public int TerminalCommandTimeoutSeconds { get; set; } = 5;
+    public int TerminalWaitMaxSeconds { get; set; } = 30;
 }
