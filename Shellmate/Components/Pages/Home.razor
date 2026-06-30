@@ -315,6 +315,7 @@ else
             if (wasRunning && !snapshot.Running)
             {
                 await ReloadAsync();
+                StateHasChanged();
                 return;
             }
 
