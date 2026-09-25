@@ -1,6 +1,8 @@
 import { redactText } from '../../diagnostics';
 import { ProviderHttpError, ProviderResponseError } from '../errors';
 import { parseJsonPayload, readSseStream } from './sse';
+import type { WebSearchActivity } from './responses';
+import type { WebSource } from '../../../shared/types';
 
 export interface AnthropicTurnInput {
   model: string;
@@ -8,8 +10,11 @@ export interface AnthropicTurnInput {
   instructions: string;
   tools?: unknown[];
   maxTokens: number;
+  /** Anthropic web search server tool type to attach, such as web_search_20260209. */
+  webSearch?: string | null;
   signal?: AbortSignal;
   onText?: (text: string) => void | Promise<void>;
+  onWebSearch?: (activity: WebSearchActivity) => void | Promise<void>;
 }
 
 export interface AnthropicTurnResult {
@@ -17,6 +22,7 @@ export interface AnthropicTurnResult {
   calls: { id: string; name: string; arguments: string }[];
   usage?: unknown;
   requestId?: string | null;
+  sources: WebSource[];
 }
 
 export interface AnthropicClientOptions {
@@ -27,14 +33,39 @@ export interface AnthropicClientOptions {
 }
 
 type AnthropicContent = Record<string, unknown>;
+type AnthropicMessage = { content: AnthropicContent[]; role: 'user' | 'assistant' };
+type StreamBlock = { type: string; start: Record<string, unknown>; id?: string; name?: string; text: string; json: string; thinking: string; signature: string; citations: unknown[] };
+
+const MAX_CONTINUATIONS = 5;
 
 function toolInputSchema(parameters: unknown): Record<string, unknown> {
   if (parameters && typeof parameters === 'object' && !Array.isArray(parameters)) return parameters as Record<string, unknown>;
   return { type: 'object' };
 }
 
-export function toAnthropicMessages(input: unknown[]): { content: AnthropicContent[]; role: 'user' | 'assistant' }[] {
-  const messages: { content: AnthropicContent[]; role: 'user' | 'assistant' }[] = [];
+function parseInput(json: string): unknown {
+  try { return json ? JSON.parse(json) : {}; } catch { return {}; }
+}
+
+/** Rebuilds a streamed content block so a paused turn can be resent unchanged. */
+function rawBlock(entry: StreamBlock): AnthropicContent {
+  if (entry.type === 'text') return { type: 'text', text: entry.text, ...(entry.citations.length ? { citations: entry.citations } : {}) };
+  if (entry.type === 'thinking') return { type: 'thinking', thinking: entry.thinking, signature: entry.signature };
+  if (entry.type === 'tool_use' || entry.type === 'server_tool_use') return { type: entry.type, id: entry.id, name: entry.name, input: parseInput(entry.json) };
+  return entry.start;
+}
+
+function searchResultActivity(result: { tool_use_id?: unknown; content?: unknown }, blocks: Map<number, StreamBlock>): WebSearchActivity {
+  const call = [...blocks.values()].find(entry => entry.type === 'server_tool_use' && entry.id === result.tool_use_id);
+  const input = parseInput(call?.json ?? '') as { query?: unknown };
+  const query = typeof input.query === 'string' && input.query ? input.query : 'web search';
+  if (Array.isArray(result.content)) return { query, detail: `${result.content.length} results` };
+  const code = (result.content as { error_code?: unknown } | undefined)?.error_code;
+  return { query, detail: `failed: ${typeof code === 'string' ? code : 'unknown error'}` };
+}
+
+export function toAnthropicMessages(input: unknown[]): AnthropicMessage[] {
+  const messages: AnthropicMessage[] = [];
   let assistantBlocks: AnthropicContent[] = [];
   let toolBlocks: AnthropicContent[] = [];
   const flushAssistant = () => {
@@ -120,7 +151,7 @@ export function toAnthropicTools(tools: unknown[] | undefined): { name: string; 
   return (tools ?? [])
     .filter(tool => (tool as { type?: string }).type === 'function')
     .map(tool => {
-      const entry = (tool as { function?: { name?: string; description?: string; parameters?: unknown } }).function ?? {};
+      const entry = tool as { name?: string; description?: string; parameters?: unknown };
       return { name: entry.name ?? '', description: entry.description, input_schema: toolInputSchema(entry.parameters) };
     })
     .filter(tool => tool.name);
@@ -179,12 +210,34 @@ export class AnthropicClient {
 
   private async request(args: AnthropicTurnInput): Promise<AnthropicTurnResult> {
     if (!Number.isInteger(args.maxTokens) || args.maxTokens <= 0) throw new Error('Anthropic max_tokens must be a positive integer.');
-    const tools = toAnthropicTools(args.tools);
+    const tools: Record<string, unknown>[] = toAnthropicTools(args.tools);
+    if (args.webSearch) tools.push({ type: args.webSearch, name: 'web_search', max_uses: 5 });
+    const messages = toAnthropicMessages(args.input);
+    const sources = new Map<string, WebSource>();
+    const calls: { id: string; name: string; arguments: string }[] = [];
+    let text = '';
+    let usage: unknown;
+    let requestId: string | null = null;
+    // Server tools can pause a long turn; resending the paused assistant content resumes it.
+    for (let continuation = 0; ; continuation++) {
+      const round = await this.round(args, tools, messages, sources);
+      text += round.text; usage = round.usage; requestId = round.requestId;
+      calls.push(...round.calls);
+      if (round.stopReason !== 'pause_turn' || continuation >= MAX_CONTINUATIONS) break;
+      messages.push({ role: 'assistant', content: round.content });
+    }
+    const output: unknown[] = [];
+    if (text) output.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
+    for (const call of calls) output.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments });
+    return { output, calls, usage, requestId, sources: [...sources.values()] };
+  }
+
+  private async round(args: AnthropicTurnInput, tools: Record<string, unknown>[], messages: AnthropicMessage[], sources: Map<string, WebSource>) {
     const body: Record<string, unknown> = {
       model: args.model,
       max_tokens: args.maxTokens,
       system: args.instructions || 'You are a helpful assistant.',
-      messages: toAnthropicMessages(args.input),
+      messages,
       stream: true,
     };
     if (tools.length) {
@@ -201,12 +254,12 @@ export class AnthropicClient {
     let stopReason: string | null = null;
     let usage: unknown;
     let stopped = false;
-    const blocks = new Map<number, { type: string; id?: string; name?: string; text: string; json: string }>();
+    const blocks = new Map<number, StreamBlock>();
     const order: number[] = [];
-    const block = (index: number): { type: string; id?: string; name?: string; text: string; json: string } => {
+    const block = (index: number): StreamBlock => {
       let entry = blocks.get(index);
       if (!entry) {
-        entry = { type: 'text', text: '', json: '' };
+        entry = { type: 'text', start: {}, text: '', json: '', thinking: '', signature: '', citations: [] };
         blocks.set(index, entry);
         order.push(index);
       }
@@ -217,8 +270,8 @@ export class AnthropicClient {
         const event = parseJsonPayload(line) as {
           type?: string;
           index?: number;
-          content_block?: { type?: string; id?: string; name?: string; text?: string };
-          delta?: { type?: string; text?: string; partial_json?: string };
+          content_block?: Record<string, unknown> & { type?: string; id?: string; name?: string; text?: string };
+          delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; signature?: string; citation?: { url?: unknown; title?: unknown }; stop_reason?: unknown };
           stop_reason?: string | null;
           usage?: unknown;
           message?: { usage?: unknown };
@@ -229,6 +282,7 @@ export class AnthropicClient {
           case 'content_block_start': {
             if (typeof event.index === 'number') {
               const entry = block(event.index);
+              entry.start = event.content_block ?? {};
               entry.type = event.content_block?.type ?? 'text';
               if (event.content_block?.id) entry.id = event.content_block.id;
               if (event.content_block?.name) entry.name = event.content_block.name;
@@ -237,24 +291,35 @@ export class AnthropicClient {
                 text += event.content_block.text;
                 await args.onText?.(event.content_block.text);
               }
+              if (entry.type === 'web_search_tool_result') await args.onWebSearch?.(searchResultActivity(entry.start, blocks));
             }
             break;
           }
           case 'content_block_delta': {
             if (typeof event.index === 'number') {
               const entry = block(event.index);
-              if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
-                entry.text += event.delta.text;
-                text += event.delta.text;
-                await args.onText?.(event.delta.text);
-              } else if (event.delta?.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
-                entry.json += event.delta.partial_json;
+              const delta = event.delta;
+              if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+                entry.text += delta.text;
+                text += delta.text;
+                await args.onText?.(delta.text);
+              } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+                entry.json += delta.partial_json;
+              } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+                entry.thinking += delta.thinking;
+              } else if (delta?.type === 'signature_delta' && typeof delta.signature === 'string') {
+                entry.signature += delta.signature;
+              } else if (delta?.type === 'citations_delta' && delta.citation) {
+                entry.citations.push(delta.citation);
+                const { url, title } = delta.citation;
+                if (typeof url === 'string' && !sources.has(url)) sources.set(url, { url, ...(typeof title === 'string' && title ? { title } : {}) });
               }
             }
             break;
           }
           case 'message_delta': {
             if (event.stop_reason !== undefined) stopReason = event.stop_reason;
+            if (typeof event.delta?.stop_reason === 'string') stopReason = event.delta.stop_reason;
             if (event.usage !== undefined) usage = event.usage;
             if (event.delta && typeof event.delta === 'object' && !('stop_reason' in (event.delta as Record<string, unknown>))) {
               usage = { ...((usage as Record<string, unknown>) ?? {}), ...(event.delta as Record<string, unknown>) };
@@ -284,17 +349,15 @@ export class AnthropicClient {
     if (!stopped && stopReason === null && !text && ![...blocks.values()].some(entry => entry.type === 'tool_use')) {
       throw failure({}, 'Chat response stream ended before completion.');
     }
-    const output: unknown[] = [];
     const calls: { id: string; name: string; arguments: string }[] = [];
-    if (text) output.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
+    const content: AnthropicContent[] = [];
     for (const index of order) {
-      const entry = blocks.get(index);
-      if (!entry || entry.type !== 'tool_use' || !entry.id || !entry.name) continue;
-      const call = { id: entry.id, name: entry.name, arguments: entry.json || '{}' };
-      output.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments });
-      calls.push(call);
+      const entry = blocks.get(index)!;
+      content.push(rawBlock(entry));
+      if (entry.type !== 'tool_use' || !entry.id || !entry.name) continue;
+      calls.push({ id: entry.id, name: entry.name, arguments: entry.json || '{}' });
     }
     if (stopReason === 'tool_use' && !calls.length) throw failure({}, 'Chat response stream ended during a tool call.');
-    return { output, calls, usage, requestId };
+    return { text, calls, usage, requestId, stopReason, content };
   }
 }

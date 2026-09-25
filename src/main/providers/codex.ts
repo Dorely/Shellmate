@@ -1,14 +1,16 @@
 import { redactText } from '../diagnostics';
 import { ProviderHttpError, ProviderResponseError } from './errors';
 import { postWithEffortFallback } from './generic/chat';
+import { collectCitations, webSearchActivity, type WebSearchActivity } from './generic/responses';
 import { DEFAULT_MODEL, resolveChatModel } from '../../shared/chat-models';
+import type { WebSource } from '../../shared/types';
 export { ProviderHttpError } from './errors';
 
 const RESPONSES_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
 const ORIGINATOR = 'codex_cli_rs';
 
-export interface StreamChatInput { token: string; model?: string; input: unknown; instructions?: string; tools?: unknown[]; effort?: string; signal?: AbortSignal; onText?: (text: string) => void | Promise<void> }
-export interface StreamChatResult { output: any[]; calls: { id: string; name: string; arguments: string }[]; usage?: unknown; requestId?: string | null }
+export interface StreamChatInput { token: string; model?: string; input: unknown; instructions?: string; tools?: unknown[]; webSearch?: boolean; effort?: string; signal?: AbortSignal; onText?: (text: string) => void | Promise<void>; onWebSearch?: (activity: WebSearchActivity) => void | Promise<void> }
+export interface StreamChatResult { output: any[]; calls: { id: string; name: string; arguments: string }[]; usage?: unknown; requestId?: string | null; sources: WebSource[] }
 export interface CodexClientOptions { fetch?: typeof globalThis.fetch; endpoint?: string }
 
 export function accountId(token: string): string {
@@ -52,7 +54,8 @@ export class CodexClient {
   private async request(args: StreamChatInput): Promise<StreamChatResult> {
     const buildBody = (effortFields: Record<string, unknown>): Record<string, unknown> => {
       const body: Record<string, unknown> = { model: resolveChatModel(args.model), stream: true, store: false, input: args.input, instructions: args.instructions ?? 'You are a helpful assistant.', ...effortFields };
-      if (args.tools?.length) { body.tools = args.tools; body.tool_choice = 'auto'; }
+      const tools = [...(args.tools ?? []), ...(args.webSearch ? [{ type: 'web_search' }] : [])];
+      if (tools.length) { body.tools = tools; body.tool_choice = 'auto'; }
       return body;
     };
     const headers = { authorization: `Bearer ${args.token}`, 'ChatGPT-Account-ID': accountId(args.token), 'OpenAI-Beta': 'responses=experimental', originator: ORIGINATOR, 'User-Agent': 'codex_cli_rs/0.0.0 (Shellmate)', accept: 'text/event-stream', 'content-type': 'application/json' };
@@ -95,6 +98,14 @@ export class CodexClient {
       return call;
     };
     const output: any[] = [];
+    const sources = new Map<string, WebSource>();
+    const searches = new Set<string>();
+    const reportSearch = async (item: any) => {
+      const activity = webSearchActivity(item);
+      if (!activity || (typeof item.id === 'string' && searches.has(item.id))) return;
+      if (typeof item.id === 'string') searches.add(item.id);
+      await args.onWebSearch?.(activity);
+    };
     const consume = async (data: string): Promise<void> => {
       if (data === '[DONE]') return;
       let event: any; try { event = JSON.parse(data); } catch { return; }
@@ -120,7 +131,8 @@ export class CodexClient {
             const message = upsertMessage(item, event.output_index);
             const finalText = messageText(item);
             if (finalText) message.text = finalText;
-          }
+            collectCitations(item, sources);
+          } else if (item?.type === 'web_search_call') await reportSearch(item);
           break;
         }
         case 'response.completed': case 'response.done':
@@ -137,7 +149,8 @@ export class CodexClient {
               const message = upsertMessage(item, index);
               const finalText = messageText(item);
               if (finalText) message.text = finalText;
-            }
+              collectCitations(item, sources);
+            } else if (item?.type === 'web_search_call') await reportSearch(item);
           }
           break;
         case 'response.failed': throw streamFailure(event.response ?? event, 'Codex response failed.');
@@ -176,7 +189,7 @@ export class CodexClient {
         if (!entry.message.streamed) await args.onText?.(entry.message.text);
       } else output.push({ type: 'function_call', call_id: entry.call.id, name: entry.call.name, arguments: entry.call.arguments });
     }
-    return { output, calls: finishedCalls.map(({ id, name, arguments: callArguments }) => ({ id, name, arguments: callArguments })), usage, requestId };
+    return { output, calls: finishedCalls.map(({ id, name, arguments: callArguments }) => ({ id, name, arguments: callArguments })), usage, requestId, sources: [...sources.values()] };
   }
 }
 

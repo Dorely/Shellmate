@@ -8,6 +8,7 @@ import { SecureStore, secretName } from './providers/secrets';
 import { CodexAuth } from './providers/auth';
 import { ChatRegistry } from './chat-registry';
 import { ChatService } from './chat-service';
+import { WebSearchService } from './web-search';
 import { TerminalManager } from './terminal';
 import { DiagnosticLog, redactText } from './diagnostics';
 import { diagnosticError } from './providers/errors';
@@ -34,7 +35,7 @@ const connectionSchema = z.object({
 const schemas: Record<string, z.ZodTypeAny> = {
   snapshot: z.tuple([]), chatContext: z.tuple([id,string]), setTheme: z.tuple([z.enum(['graphite','light','forest'])]),
   createWorkspace: z.tuple([string]), renameWorkspace: z.tuple([id,string]), setActiveWorkspace: z.tuple([id]),
-  createConversation: z.tuple([]), renameConversation: z.tuple([id,string]), setWorkspaceAccess: z.tuple([id,z.enum(['disabled','ask','autonomous'])]),
+  createConversation: z.tuple([]), renameConversation: z.tuple([id,string]), setWorkspaceAccess: z.tuple([id,z.enum(['disabled','ask','autonomous'])]), setWorkspaceWebAccess: z.tuple([z.enum(['disabled','ask','autonomous'])]),
   sendMessage: z.tuple([id,string]), cancelTurn: z.tuple([id]), saveConnection: z.tuple([connectionSchema]), deleteConnection: z.tuple([id]), setWorkspaceConnection: z.tuple([id,z.boolean()]),
   connect: z.tuple([id]), disconnect: z.tuple([id]), resize: z.tuple([id,z.number().int(),z.number().int()]), write: z.tuple([id,string]), takeOver: z.tuple([id]),
   resolveApproval: z.tuple([id,z.boolean()]), trustHostKey: z.tuple([id,z.boolean()]), respondElevation: z.tuple([id,string.nullable()]),
@@ -44,7 +45,9 @@ const schemas: Record<string, z.ZodTypeAny> = {
   deleteChatProvider: z.tuple([id]), listChatModels: z.tuple([id]), testChatModel: z.tuple([z.object({ providerId: id, slug: string, efforts: z.array(string) })]),
   saveChatModel: z.tuple([z.object({ id: id.optional(), providerId: id, slug: string, efforts: z.array(string) })]), deleteChatModel: z.tuple([id]),
   setActiveChat: z.tuple([z.object({ modelId: string, effort: string })]),
-  testCodexModel: z.tuple([string]), saveCodexModel: z.tuple([z.object({ id: string.optional(), slug: string })]), deleteCodexModel: z.tuple([string])
+  testCodexModel: z.tuple([string]), saveCodexModel: z.tuple([z.object({ id: string.optional(), slug: string })]), deleteCodexModel: z.tuple([string]),
+  saveWebSearch: z.tuple([z.object({ backend: z.enum(['serpapi','tavily']).nullable(), apiKey: string.max(512).optional(), keyAction: z.enum(['keep','replace','remove']).optional() })]), testWebSearch: z.tuple([]),
+  openExternal: z.tuple([z.url({ protocol: /^https?$/ }).max(4096)])
 };
 
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -60,7 +63,8 @@ else {
     try { await auth.initialize(); } catch (error) { authError = safeError(error); }
     const registry = new ChatRegistry(store, secrets);
     const terminal = new TerminalManager(store, secrets, changed, event => { if (window && !window.isDestroyed()) window.webContents.send('shellmate:terminal', event); browserHost?.terminal(event); });
-    const chat = new ChatService(store, terminal, registry, auth, changed, diagnostics);
+    const webSearch = new WebSearchService(store, secrets);
+    const chat = new ChatService(store, terminal, registry, auth, webSearch, changed, diagnostics);
     if (!store.conversations(store.activeWorkspaceId()).length) store.createConversation(store.activeWorkspaceId());
     const activeWorkspace = () => store.activeWorkspaceId();
     const snapshot = async (): Promise<Snapshot> => {
@@ -74,7 +78,7 @@ else {
         conversations: store.conversations(workspaceId), messages: store.messages(workspaceId),
         terminals: terminal.snapshots(workspaceId), approvals: chat.approvals().filter(item => item.workspaceId === workspaceId), hostKeys: terminal.pendingHostKeys(), elevations: terminal.pendingElevations(),
         providers: { codexReady: auth.status.ready, loginPending: auth.status.pending, secureStorageAvailable: await secrets.available(), error: auth.status.error ?? authError,
-          chatModels: registry.options(), activeChat: registry.activeSelection(), providers: registry.providers() }, activeTurns: chat.activeTurns() };
+          chatModels: registry.options(), activeChat: registry.activeSelection(), providers: registry.providers() }, webSearch: await webSearch.status(), activeTurns: chat.activeTurns() };
     };
     async function saveConnection(input: ConnectionInput): Promise<ConnectionProfile> {
       const old = input.id ? store.connection(input.id) : null;
@@ -105,6 +109,7 @@ else {
       setActiveWorkspace: workspaceId => { store.setActiveWorkspace(workspaceId); if (!store.conversations(workspaceId).length) store.createConversation(workspaceId); },
       createConversation: () => store.createConversation(activeWorkspace()).id, renameConversation: (conversationId, title) => store.renameConversation(conversationId, title),
       setWorkspaceAccess: (connectionId, access) => { const workspaceId = activeWorkspace(); if (!store.hasWorkspaceConnection(workspaceId, connectionId)) throw new Error('Connection is not in this workspace.'); chat.restrictWorkspaceAccess(workspaceId, connectionId, access); store.setWorkspaceAccess(workspaceId, connectionId, access); },
+      setWorkspaceWebAccess: access => { const workspaceId = activeWorkspace(); chat.restrictWorkspaceWebAccess(workspaceId, access); store.setWorkspaceWebAccess(workspaceId, access); },
       sendMessage: (conversationId, text) => chat.sendMessage(conversationId, text), cancelTurn: conversationId => chat.cancelTurn(conversationId),
       saveConnection, deleteConnection: async connectionId => { terminal.disconnectProfile(connectionId); store.deleteConnection(connectionId); await secrets.delete(secretName('ssh-password', connectionId)); await secrets.delete(secretName('ssh-passphrase', connectionId)); },
       setWorkspaceConnection: (connectionId, included) => { const workspaceId = activeWorkspace(); if (!included) { chat.restrictWorkspaceAccess(workspaceId, connectionId, null); terminal.disconnect(workspaceId, connectionId, true); } store.setWorkspaceConnection(workspaceId, connectionId, included); },
@@ -118,7 +123,9 @@ else {
       saveChatProvider: input => registry.saveProvider(input), deleteChatProvider: providerId => registry.deleteProvider(providerId), listChatModels: providerId => registry.listModels(providerId),
       testChatModel: input => registry.testModel(input), saveChatModel: input => registry.saveModel(input), deleteChatModel: modelId => registry.deleteModel(modelId),
       setActiveChat: input => registry.setActive(input.modelId, input.effort),
-      testCodexModel: slug => registry.testCodexModel(slug, auth), saveCodexModel: input => registry.saveCodexModel(input, auth), deleteCodexModel: modelId => registry.deleteCodexModel(modelId)
+      testCodexModel: slug => registry.testCodexModel(slug, auth), saveCodexModel: input => registry.saveCodexModel(input, auth), deleteCodexModel: modelId => registry.deleteCodexModel(modelId),
+      saveWebSearch: async input => { await webSearch.save(input); changed(); }, testWebSearch: () => webSearch.test(),
+      openExternal: url => shell.openExternal(new URL(url).toString())
     };
     const invoke = async (method: unknown, rawArgs: unknown): Promise<unknown> => {
       if (quitting) throw new Error('Shellmate is closing.');

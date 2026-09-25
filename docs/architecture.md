@@ -10,6 +10,18 @@ The `shellmate.sqlite` profile uses SQLite WAL, foreign keys, and a versioned sc
 
 Provider transports and registry logic were adapted from the SfxChat revision recorded in [sources](sources.md). The chat runtime stores Responses-shaped wire history plus a tool ledger. A tool call records its intent before dispatch and its result afterward. Startup marks incomplete turns and tools as interrupted or uncertain. Missing tool outputs can be repaired from the ledger without rerunning a command. A conversation pins provider/model/effort for its turn. Generic providers are tested before model records are saved. A custom Codex model requires a completed text response at medium effort before it can be saved; its test is bound to the signed-in account and expires after ten minutes. Other displayed effort levels are untested.
 
+## Web access
+
+Each workspace stores a `webAccess` mode; schema version 3 sets it to Ask for existing workspaces and adds a `hostedSearch` field to saved API models. A turn freezes the mode at its start, and `ChatService` recomputes the tool list every round from the stricter of the frozen and current modes, so restrictions apply immediately.
+
+Built-in search is attached only in Autonomous mode. The Codex and generic Responses adapters add `{type:'web_search'}`, report `web_search_call` items as activity rows, and collect `url_citation` annotations as message sources. The Anthropic adapter adds the server tool version found by the model test (`web_search_20260209`, falling back to `web_search_20250305`), reports `web_search_tool_result` blocks, collects `citations_delta` sources, and continues `pause_turn` responses up to five times. Chat Completions has no built-in search. The capability test records whether a model actually ran the hosted search tool.
+
+Otherwise the app offers its own `web_search` (when a SerpApi or Tavily key is saved) and `web_fetch`. In Ask mode each call raises a `kind:'web'` approval; command approvals are `kind:'command'`. Search keys live in `SecureStore`. The SerpApi key travels in the request URL, so request URLs are never logged or put in errors, and backend errors are redacted.
+
+`web_fetch` accepts only http(s) URLs without embedded credentials and rejects literal loopback, private, link-local, CGNAT, and reserved addresses before any approval prompt. The undici agent's DNS `lookup` rejects hostnames that resolve to those ranges, which also covers redirects and DNS rebinding. Redirects are followed manually (at most five), requests time out after 15 seconds, bodies stop at 2 MB, and only text, HTML, JSON, and XML are read. HTML becomes plain text through `html-to-text`, and each call returns up to 20,000 characters with a continuation offset. The prompt marks all web content as untrusted and forbids secrets, internal hosts, and note contents in queries or URLs.
+
+The renderer opens links through the `openExternal` operation, which accepts only http(s) URLs and passes them to the system browser.
+
 ## Terminals and ownership
 
 The main process keeps one live session per workspace/connection pair. Local sessions use node-pty; SSH sessions use ssh2 interactive shells and compare each host-key SHA-256 hash with the explicitly trusted profile hash. Unknown or changed keys are rejected until the user trusts the presented fingerprint. The renderer uses xterm and receives bounded output snapshots plus sequential live chunks.

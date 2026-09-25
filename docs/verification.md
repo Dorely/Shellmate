@@ -44,3 +44,14 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - The built app ran in browser mode under `--inspect-brk` with a CDP client that enabled `NodeWorker` with `waitForDebuggerOnStart`, the same worker pause VS Code js-debug applies, and set `VSCODE_INSPECTOR_OPTIONS`. Local PowerShell connected in about two seconds with integration ready. A typed `cd C:\Windows; cmd /c exit 3` reported cwd `C:\Windows` and exit code 3. Resize and disconnect worked, and no Shellmate `OpenConsole.exe` remained afterward.
 - A packaged `electron-builder --win dir` build (to a scratch directory, because `release-ready/win-unpacked/resources/app.asar` was locked) included `out/main/pty-host.js` in the asar and the unpacked ConPTY files. Driven over the renderer's DevTools protocol, it connected local PowerShell with integration ready and reported cwd and exit code 4.
 - The real VS Code F5 button was not pressed; the check above reproduces its worker-pausing debugger.
+
+2026-09-24 web search, fetch, and citations:
+
+- `npm run typecheck` and `npm run build` passed.
+- `npm run browser` opened the live profile. It migrated to schema version 3, and the Default workspace showed `Web · ask`. The Access picker's Web row changed the mode, and Autonomous persisted across an app restart.
+- Codex (`gpt-6-sol`, high), Autonomous: asking for the current Node.js LTS produced two `web_search (built-in)` activity rows (a search query and an `open` of nodejs.org), an answer citing nodejs.org, and a Sources list. Activity rows were first shown after the answer bubble; the bubble is now split around each search. That ordering change was typechecked and built but not rechecked live.
+- Ask mode: a request to fetch three URLs raised a web approval card for each. The approved `https://example.com` returned "Example Domain". The approved `http://127.0.0.1:8080/` was blocked as a private address. The rejected `http://192.168.1.1/` returned a declined error. Literal private URLs are now rejected before the approval prompt; this was not rechecked live.
+- A standalone bundle of `web-fetch.ts` blocked `localtest.me` (resolves to loopback), `[::1]`, `[::ffff:127.0.0.1]`, `2130706433`, `169.254.169.254`, `file://`, embedded credentials, and an httpbin redirect to `127.0.0.1`, and fetched `https://example.com/`.
+- Disabled mode: the model listed no web tools and declined to fetch.
+- Providers → Web search rendered the None/SerpApi/Tavily selector and key field. No search key was entered, so SerpApi, Tavily, and app-owned `web_search` were not exercised. No Anthropic, generic Responses, or Chat Completions provider was configured, so their built-in search, citations, `pause_turn` handling, the Anthropic and Chat Completions tool-shape fixes, and the Responses `reasoning.effort` change were not verified live.
+- The Web mode was restored to Ask and the browser-mode app was stopped.

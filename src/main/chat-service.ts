@@ -1,5 +1,5 @@
 import { ContextTokenCounter } from './chat-context';
-import { tools, instructions } from './assistant';
+import { toolsFor, instructions, type SearchSource } from './assistant';
 import { CHAT_MODELS } from '../shared/chat-models';
 import { ChatCompletionsClient, toChatMessages, toResponsesOutput } from './providers/generic/chat';
 import { GenericResponsesClient } from './providers/generic/responses';
@@ -11,10 +11,16 @@ import type { DiagnosticLog } from './diagnostics';
 import { redactText } from './diagnostics';
 import type { Store } from './store';
 import type { TerminalManager } from './terminal';
-import type { AccessMode, ApprovalRequest } from '../shared/types';
+import type { WebSearchService } from './web-search';
+import { checkUrl, webFetch } from './web-fetch';
+import type { AccessMode, ApprovalRequest, WebSource } from '../shared/types';
 import { randomUUID } from 'node:crypto';
 
-type Turn = { controller: AbortController; targets: Map<string, AccessMode> };
+type Turn = { controller: AbortController; targets: Map<string, AccessMode>; web: AccessMode };
+type WebPlan = { web: AccessMode; hosted: boolean; search: SearchSource; tools: unknown[] };
+type ApprovalDetails = { kind: 'command'; connectionId: string; sessionId: string; command: string } | { kind: 'web'; action: 'search' | 'fetch'; detail: string };
+const CONNECTIONLESS_TOOLS = new Set(['rename_session', 'web_search', 'web_fetch']);
+const ACCESS_RANK: Record<AccessMode, number> = { disabled: 0, ask: 1, autonomous: 2 };
 type PendingApproval = { request: ApprovalRequest; resolve: (allow: boolean) => void };
 const bounded = (value: string, length = 5_000) => value.length > length ? value.slice(-length) : value;
 
@@ -26,7 +32,7 @@ export class ChatService {
   private live = new Map<string, { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string }>();
   private codex = new CodexClient();
   private shuttingDown = false;
-  constructor(private store: Store, private terminal: TerminalManager, private registry: ChatRegistry, private auth: CodexAuth, private changed: () => void, private diagnostics: DiagnosticLog) {}
+  constructor(private store: Store, private terminal: TerminalManager, private registry: ChatRegistry, private auth: CodexAuth, private search: WebSearchService, private changed: () => void, private diagnostics: DiagnosticLog) {}
   activeTurns(): string[] { return [...this.turns.keys()]; }
   approvals(): ApprovalRequest[] { return [...this.pending.values()].map(item => item.request); }
   restrictWorkspaceAccess(workspaceId: string, connectionId: string, access: AccessMode | null): void {
@@ -37,6 +43,21 @@ export class ChatService {
       else if (access === 'ask' && previous === 'autonomous') turn.targets.set(connectionId, 'ask');
     }
   }
+  restrictWorkspaceWebAccess(workspaceId: string, access: AccessMode): void {
+    for (const [conversationId, turn] of this.turns) if (this.store.conversation(conversationId).workspaceId === workspaceId && ACCESS_RANK[access] < ACCESS_RANK[turn.web]) turn.web = access;
+  }
+  /** The stricter of the turn's frozen web mode and the workspace's current one. */
+  private webMode(conversationId: string, turn?: Turn): AccessMode {
+    const current = this.store.workspace(this.store.conversation(conversationId).workspaceId).webAccess;
+    return turn && ACCESS_RANK[turn.web] < ACCESS_RANK[current] ? turn.web : current;
+  }
+  /** Built-in search is only offered in Autonomous mode because provider-side searches cannot be approved per call. */
+  private async webPlan(conversationId: string, target: ResolvedChatTarget | null, turn?: Turn): Promise<WebPlan> {
+    const web = this.webMode(conversationId, turn);
+    const hosted = web === 'autonomous' && (target?.kind === 'codex' || Boolean(target?.record?.hostedSearch));
+    const app = web !== 'disabled' && !hosted && await this.search.configured();
+    return { web, hosted, search: hosted ? 'built-in' : app ? 'app' : 'none', tools: toolsFor({ web, appSearch: app }) };
+  }
   private targetInfo(conversationId: string, frozen?: Turn) {
     const conversation = this.store.conversation(conversationId);
     const targets = (frozen ? [...frozen.targets].map(([connectionId, access]) => ({ connectionId, access })) : this.store.workspaceConnections(conversation.workspaceId))
@@ -45,9 +66,9 @@ export class ChatService {
     return targets.map(target => ({ id: target.connectionId, name: this.store.connection(target.connectionId).name, access: target.access,
       connected: Boolean(this.terminal.session(conversation.workspaceId, target.connectionId)), notes: this.store.notes(target.connectionId).map(note => note.title) }));
   }
-  private chatInstructions(conversationId: string, frozen?: Turn) {
+  private chatInstructions(conversationId: string, plan: WebPlan, frozen?: Turn) {
     const conversation = this.store.conversation(conversationId);
-    return instructions({ workspace: this.store.workspace(conversation.workspaceId).name, conversation: conversation.title, targets: this.targetInfo(conversationId, frozen) });
+    return instructions({ workspace: this.store.workspace(conversation.workspaceId).name, conversation: conversation.title, targets: this.targetInfo(conversationId, frozen), web: plan.web, search: plan.search });
   }
   private history(conversationId: string): unknown[] {
     const raw = this.store.setting(`history/${conversationId}`, '[]');
@@ -62,12 +83,14 @@ export class ChatService {
     this.store.setSetting(`history/${conversationId}`, JSON.stringify(parsed));
     return parsed;
   }
-  chatContext(conversationId: string, draft: string) {
+  async chatContext(conversationId: string, draft: string) {
     const live = this.live.get(conversationId);
     const selection = this.registry.activeSelection();
     const model = live?.model ?? selection.modelId.replace(/^codex:/, '');
     const entry = CHAT_MODELS.find(item => item.id === model);
-    return { model, limit: entry?.contextLimit ?? null, ...this.counter.count({ instructions: live?.instructions ?? this.chatInstructions(conversationId), tools: live?.tools ?? tools as unknown as unknown[], input: live?.input ?? this.history(conversationId), draft, streamingText: live?.text }) };
+    if (live) return { model, limit: entry?.contextLimit ?? null, ...this.counter.count({ instructions: live.instructions, tools: live.tools, input: live.input, draft, streamingText: live.text }) };
+    const plan = await this.webPlan(conversationId, await this.registry.resolveActive().catch(() => null));
+    return { model, limit: entry?.contextLimit ?? null, ...this.counter.count({ instructions: this.chatInstructions(conversationId, plan), tools: plan.tools, input: this.history(conversationId), draft }) };
   }
   async sendMessage(conversationId: string, text: string) {
     if (this.shuttingDown) throw new Error('Shellmate is closing.');
@@ -76,7 +99,7 @@ export class ChatService {
     if (this.turns.has(conversationId)) throw new Error('A response is already running.');
     const target = await this.registry.resolveActive();
     const workspaceId = this.store.conversation(conversationId).workspaceId;
-    const turn: Turn = { controller: new AbortController(), targets: new Map(this.store.workspaceConnections(workspaceId).map(item => [item.connectionId, item.access])) };
+    const turn: Turn = { controller: new AbortController(), targets: new Map(this.store.workspaceConnections(workspaceId).map(item => [item.connectionId, item.access])), web: this.store.workspace(workspaceId).webAccess };
     this.turns.set(conversationId, turn);
     this.store.titleConversation(conversationId, text); this.store.addMessage(conversationId, 'user', text.trim()); this.store.setTurn(conversationId, 'running');
     const task = this.runTurn(conversationId, text.trim(), target, turn).finally(() => {
@@ -96,16 +119,17 @@ export class ChatService {
     const item = this.pending.get(id); if (!item) throw new Error('Approval expired.');
     this.pending.delete(id); item.resolve(allow); this.changed();
   }
-  private async stream(target: ResolvedChatTarget, args: { input: unknown[]; instructions: string; signal: AbortSignal; onText: (text: string) => void }) {
-    const availableTools = tools as unknown as unknown[];
+  private async stream(target: ResolvedChatTarget, args: { input: unknown[]; instructions: string; plan: WebPlan; signal: AbortSignal; onText: (text: string) => void; onWebSearch: (activity: { query: string; detail?: string }) => void }) {
+    const { tools, hosted } = args.plan;
     const system = args.instructions;
     const signal = AbortSignal.any([args.signal, AbortSignal.timeout(180_000)]);
-    if (target.kind === 'codex') return this.codex.streamChat({ model: target.slug, input: args.input, instructions: system, tools: availableTools, effort: target.effort, token: await this.auth.getAccessToken(), signal, onText: args.onText });
+    const common = { model: target.slug, input: args.input, instructions: system, tools, signal, onText: args.onText, onWebSearch: args.onWebSearch };
+    if (target.kind === 'codex') return this.codex.streamChat({ ...common, webSearch: hosted, effort: target.effort, token: await this.auth.getAccessToken() });
     const key = target.provider ? await this.registry.providerKey(target.provider.id) : null;
-    if (target.kind === 'anthropic') return new AnthropicClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ model: target.slug, input: args.input, instructions: system, tools: availableTools, maxTokens: target.record?.maxTokens ?? 8192, signal, onText: args.onText });
-    if (target.kind === 'responses') return new GenericResponsesClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ model: target.slug, input: args.input, instructions: system, tools: availableTools, effort: target.effort || undefined, signal, onText: args.onText });
-    const result = await new ChatCompletionsClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ model: target.slug, messages: toChatMessages(args.input, system), tools: availableTools, effort: target.effort || undefined, signal, onText: args.onText });
-    return { output: toResponsesOutput(result.text, result.calls), calls: result.calls, usage: result.usage, requestId: result.requestId };
+    if (target.kind === 'anthropic') return new AnthropicClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ ...common, webSearch: hosted ? target.record?.hostedSearch : null, maxTokens: target.record?.maxTokens ?? 8192 });
+    if (target.kind === 'responses') return new GenericResponsesClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ ...common, webSearch: hosted, effort: target.effort || undefined });
+    const result = await new ChatCompletionsClient({ baseUrl: target.provider!.baseUrl, apiKey: key }).streamChat({ model: target.slug, messages: toChatMessages(args.input, system), tools, effort: target.effort || undefined, signal, onText: args.onText });
+    return { output: toResponsesOutput(result.text, result.calls), calls: result.calls, usage: result.usage, requestId: result.requestId, sources: [] as WebSource[] };
   }
   private async runTurn(conversationId: string, text: string, target: ResolvedChatTarget, turn: Turn) {
     let message = this.store.addMessage(conversationId, 'assistant', '', 'running');
@@ -114,11 +138,20 @@ export class ChatService {
       const input = this.history(conversationId);
       input.push({ role: 'user', content: [{ type: 'input_text', text }] });
       this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
-      const prompt = this.chatInstructions(conversationId, turn);
-      const live = { input, text: '', instructions: prompt, tools: tools as unknown as unknown[], model: target.slug }; this.live.set(conversationId, live);
+      const prompt = this.chatInstructions(conversationId, await this.webPlan(conversationId, target, turn), turn);
+      const live: { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string } = { input, text: '', instructions: prompt, tools: [], model: target.slug }; this.live.set(conversationId, live);
       for (; round < 30 && !turn.controller.signal.aborted; round++) {
-        const response = await this.stream(target, { input, instructions: prompt, signal: turn.controller.signal, onText: chunk => { live.text += chunk; message.text += chunk; this.store.updateMessage(message); } });
-        message.status = 'completed'; this.store.updateMessage(message); input.push(...response.output); live.text = '';
+        const plan = await this.webPlan(conversationId, target, turn); live.tools = plan.tools;
+        const response = await this.stream(target, { input, instructions: prompt, plan, signal: turn.controller.signal,
+          onText: chunk => { live.text += chunk; message.text += chunk; this.store.updateMessage(message); },
+          onWebSearch: activity => {
+            // Close the current bubble so the activity row sits between the text before and after the search.
+            if (message.text) { message.status = 'completed'; this.store.updateMessage(message); } else this.store.deleteMessage(message.id);
+            this.store.addMessage(conversationId, 'tool', activity.detail ? `${activity.query} — ${activity.detail}` : activity.query, 'completed', undefined, 'web_search (built-in)');
+            message = this.store.addMessage(conversationId, 'assistant', '', 'running');
+          } });
+        message.status = 'completed'; if (response.sources.length) message.sources = response.sources;
+        this.store.updateMessage(message); input.push(...response.output); live.text = '';
         this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
         for (const call of response.calls) {
           const result = turn.controller.signal.aborted ? JSON.stringify({ error: 'Turn cancelled before tool dispatch.' }) : await this.executeTool(conversationId, call, turn);
@@ -146,13 +179,22 @@ export class ChatService {
     if (!frozen || frozen === 'disabled' || !current || current === 'disabled' || !this.store.hasWorkspaceConnection(workspaceId, connectionId)) throw new Error('Connection is not available to this conversation.');
     return frozen === 'ask' || current === 'ask' ? 'ask' : 'autonomous';
   }
-  private async approve(conversationId: string, connectionId: string, sessionId: string, command: string, turn: Turn): Promise<void> {
-    const request: ApprovalRequest = { id: randomUUID(), conversationId, workspaceId: this.store.conversation(conversationId).workspaceId, connectionId, sessionId, command, createdAt: new Date().toISOString() };
+  private async approve(conversationId: string, details: ApprovalDetails, turn: Turn): Promise<void> {
+    const request: ApprovalRequest = { id: randomUUID(), conversationId, workspaceId: this.store.conversation(conversationId).workspaceId, createdAt: new Date().toISOString(), ...details };
     const allowed = await new Promise<boolean>(resolve => { this.pending.set(request.id, { request, resolve }); this.changed(); turn.controller.signal.addEventListener('abort', () => resolve(false), { once: true }); });
     this.pending.delete(request.id); this.changed();
-    if (!allowed || turn.controller.signal.aborted) throw new Error('Command approval declined or cancelled.');
-    if (this.terminal.session(request.workspaceId, connectionId)?.id !== sessionId) throw new Error('Session changed while awaiting approval.');
-    this.permitted(conversationId, connectionId, turn);
+    if (!allowed || turn.controller.signal.aborted) throw new Error(`${details.kind === 'command' ? 'Command' : 'Web request'} approval declined or cancelled.`);
+    if (details.kind === 'web') { this.webPermitted(conversationId, turn); return; }
+    if (this.terminal.session(request.workspaceId, details.connectionId)?.id !== details.sessionId) throw new Error('Session changed while awaiting approval.');
+    this.permitted(conversationId, details.connectionId, turn);
+  }
+  private webPermitted(conversationId: string, turn: Turn): AccessMode {
+    const mode = this.webMode(conversationId, turn);
+    if (mode === 'disabled') throw new Error('Web access is disabled for this workspace.');
+    return mode;
+  }
+  private async webGate(conversationId: string, turn: Turn, action: 'search' | 'fetch', detail: string): Promise<void> {
+    if (this.webPermitted(conversationId, turn) === 'ask') await this.approve(conversationId, { kind: 'web', action, detail }, turn);
   }
   private async executeTool(conversationId: string, call: { id: string; name: string; arguments: string }, turn: Turn): Promise<string> {
     const old = this.store.toolCall(call.id);
@@ -165,9 +207,9 @@ export class ChatService {
       const args = data as Record<string, unknown>;
       const string = (key: string) => { if (typeof args[key] !== 'string') throw new Error(`${key} is required.`); return args[key] as string; };
       const workspaceId = this.store.conversation(conversationId).workspaceId;
-      const wantsConnection = call.name !== 'rename_session';
-      if (wantsConnection) { connectionId = string('connectionId'); this.permitted(conversationId, connectionId, turn); }
+      if (!CONNECTIONLESS_TOOLS.has(call.name)) { connectionId = string('connectionId'); this.permitted(conversationId, connectionId, turn); }
       let result: unknown;
+      let summary: string | undefined;
       switch (call.name) {
         case 'connect_terminal': {
           await this.terminal.connect(workspaceId, connectionId!);
@@ -180,7 +222,7 @@ export class ChatService {
         case 'run_shell_command': {
           const s = this.terminal.acquire(workspaceId, connectionId!, conversationId);
           const command = string('command');
-          if (this.permitted(conversationId, connectionId!, turn) === 'ask') await this.approve(conversationId, connectionId!, s.id, command, turn);
+          if (this.permitted(conversationId, connectionId!, turn) === 'ask') await this.approve(conversationId, { kind: 'command', connectionId: connectionId!, sessionId: s.id, command }, turn);
           if (turn.controller.signal.aborted || s.owner?.conversationId !== conversationId) throw new Error('Terminal ownership changed.');
           this.store.addMessage(conversationId, 'tool', command, 'completed', connectionId, call.name);
           result = await this.terminal.execute(s, command, typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 10, turn.controller.signal);
@@ -210,11 +252,28 @@ export class ChatService {
           else { this.store.renameConversation(conversationId, string('title'), 'assistant'); result = { renamed: true }; }
           break;
         }
+        case 'web_search': {
+          const query = string('query').trim();
+          if (!query || query.length > 400) throw new Error('Query must contain 1–400 characters.');
+          const count = Number.isInteger(args.count) ? Math.min(10, Math.max(1, args.count as number)) : 5;
+          await this.webGate(conversationId, turn, 'search', query);
+          const results = await this.search.search(query, count, turn.controller.signal);
+          result = { query, results };
+          summary = `${query} — ${results.length} result${results.length === 1 ? '' : 's'}`; break;
+        }
+        case 'web_fetch': {
+          const url = checkUrl(string('url').trim()).toString();
+          const startChar = Number.isInteger(args.startChar) ? Math.max(0, args.startChar as number) : 0;
+          await this.webGate(conversationId, turn, 'fetch', url);
+          const page = await webFetch(url, { startChar, signal: turn.controller.signal });
+          result = page;
+          summary = `${page.finalUrl}${page.title ? ` — ${page.title}` : ''} (${page.text.length.toLocaleString()} chars${page.nextStartChar === undefined ? '' : ', more available'})`; break;
+        }
         default: throw new Error('Unknown assistant tool.');
       }
       const output = JSON.stringify(result);
       this.store.finishTool(call.id, output);
-      if (call.name !== 'run_shell_command') this.store.addMessage(conversationId, 'tool', `${call.name}: ${bounded(output, 1_000)}`, 'completed', connectionId, call.name);
+      if (call.name !== 'run_shell_command') this.store.addMessage(conversationId, 'tool', summary ?? `${call.name}: ${bounded(output, 1_000)}`, 'completed', connectionId, call.name);
       return output;
     } catch (error) {
       const output = JSON.stringify({ error: redactText(error instanceof Error ? error.message : 'Tool failed.') });

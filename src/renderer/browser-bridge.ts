@@ -2,11 +2,12 @@ import type { ShellmateApi } from '../shared/types';
 
 const methods = [
   'snapshot', 'chatContext', 'setTheme', 'createWorkspace', 'renameWorkspace', 'setActiveWorkspace',
-  'createConversation', 'renameConversation', 'setWorkspaceAccess', 'sendMessage', 'cancelTurn',
+  'createConversation', 'renameConversation', 'setWorkspaceAccess', 'setWorkspaceWebAccess', 'sendMessage', 'cancelTurn',
   'saveConnection', 'deleteConnection', 'setWorkspaceConnection', 'connect', 'disconnect', 'resize', 'write', 'takeOver',
   'resolveApproval', 'trustHostKey', 'respondElevation', 'listNotes', 'saveNote', 'deleteNote',
   'startLogin', 'cancelLogin', 'logout', 'saveChatProvider', 'deleteChatProvider', 'listChatModels',
-  'testChatModel', 'saveChatModel', 'deleteChatModel', 'setActiveChat', 'testCodexModel', 'saveCodexModel', 'deleteCodexModel'
+  'testChatModel', 'saveChatModel', 'deleteChatModel', 'setActiveChat', 'testCodexModel', 'saveCodexModel', 'deleteCodexModel',
+  'saveWebSearch', 'testWebSearch', 'openExternal'
 ] as const;
 
 export async function installBrowserBridge(): Promise<void> {

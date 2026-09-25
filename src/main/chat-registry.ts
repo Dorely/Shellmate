@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Store } from './store';
 import { secretName, type SecureStore } from './providers/secrets';
-import type { ChatModelEntry } from '../shared/types';
+import type { ChatModelEntry, ChatModelOption } from '../shared/types';
 import { CHAT_MODELS, CODEX_EFFORTS, DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/chat-models';
 import {
   effortsKey,
@@ -135,13 +135,14 @@ export class ChatRegistry {
     return { selectionId: record.id, modelLabel: `${provider.label}:${record.slug}`, providerLabel: provider.label, slug: record.slug, effort, kind: provider.kind, provider, record };
   }
 
-  options(): { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean }[] {
-    const entries: { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean }[] = CHAT_MODELS.map(entry => ({ id: `codex:${entry.id}`, label: `Codex:${entry.id}`, providerLabel: 'Codex', slug: entry.id, efforts: [...entry.efforts], builtIn: true }));
-    for (const slug of this.codexModels()) entries.push({ id: `codex:${slug}`, label: `Codex:${slug}`, providerLabel: 'Codex', slug, efforts: [...CODEX_EFFORTS], builtIn: false });
+  options(): ChatModelOption[] {
+    // Codex models always have the hosted web_search tool.
+    const entries: ChatModelOption[] = CHAT_MODELS.map(entry => ({ id: `codex:${entry.id}`, label: `Codex:${entry.id}`, providerLabel: 'Codex', slug: entry.id, efforts: [...entry.efforts], builtIn: true, hostedSearch: true }));
+    for (const slug of this.codexModels()) entries.push({ id: `codex:${slug}`, label: `Codex:${slug}`, providerLabel: 'Codex', slug, efforts: [...CODEX_EFFORTS], builtIn: false, hostedSearch: true });
     for (const model of this.models()) {
       const provider = this.providers().find(entry => entry.id === model.providerId);
       if (!provider) continue;
-      entries.push({ id: model.id, label: `${provider.label}:${model.slug}`, providerLabel: provider.label, slug: model.slug, efforts: model.efforts, builtIn: false });
+      entries.push({ id: model.id, label: `${provider.label}:${model.slug}`, providerLabel: provider.label, slug: model.slug, efforts: model.efforts, builtIn: false, hostedSearch: Boolean(model.hostedSearch) });
     }
     return entries;
   }
@@ -226,6 +227,7 @@ export class ChatRegistry {
       maxTokens: pending.outcome.maxTokens,
       vision: pending.outcome.vision,
       audio: pending.outcome.audio,
+      hostedSearch: pending.outcome.hostedSearch,
       effortResults: pending.outcome.perEffort,
       lastTestedAt: new Date(this.now()).toISOString(),
       ...(pending.outcome.error ? { testError: pending.outcome.error } : {}),

@@ -123,7 +123,7 @@ export function toChatMessages(input: unknown[], instructions: string): ChatMess
 }
 
 export async function postWithEffortFallback(args: {
-  kind: 'chat-completions' | 'codex-account';
+  kind: 'chat-completions' | 'responses' | 'codex-account';
   effort?: string;
   fetchImpl: typeof globalThis.fetch;
   url: string;
@@ -138,7 +138,8 @@ export async function postWithEffortFallback(args: {
     args.fetchImpl(args.url, { method: 'POST', headers: args.headers, body: JSON.stringify(args.buildBody(effortFields)), signal: args.signal });
   if (!trimmed) return send({});
   if (args.kind === 'codex-account') return send({ reasoning: { effort: trimmed } });
-  const first = await send({ reasoning_effort: trimmed });
+  // Responses takes reasoning.effort; Chat Completions takes a top-level reasoning_effort.
+  const first = await send(args.kind === 'responses' ? { reasoning: { effort: trimmed } } : { reasoning_effort: trimmed });
   if (first.ok || first.status !== 400) return first;
   let probe = '';
   try {
@@ -146,10 +147,18 @@ export async function postWithEffortFallback(args: {
   } catch {
     probe = '';
   }
-  if (!/reasoning[_-]?effort/i.test(probe)) {
+  if (!(args.kind === 'responses' ? /reasoning/i : /reasoning[_-]?effort/i).test(probe)) {
     throw await ProviderHttpError.fromResponse(first, args.providerLabel, args.secrets);
   }
   return send({});
+}
+
+/** Converts flat Responses-style function tools into the nested Chat Completions shape. */
+export function toChatTools(tools: unknown[]): { type: 'function'; function: { name: string; description?: string; parameters?: unknown } }[] {
+  return tools
+    .map(tool => tool as { type?: string; name?: string; description?: string; parameters?: unknown })
+    .filter(tool => tool.type === 'function' && tool.name)
+    .map(tool => ({ type: 'function', function: { name: tool.name!, description: tool.description, parameters: tool.parameters } }));
 }
 
 export function toResponsesOutput(text: string, calls: { id: string; name: string; arguments: string }[]): unknown[] {
@@ -237,8 +246,9 @@ export class ChatCompletionsClient {
       headers: { accept: 'text/event-stream', 'content-type': 'application/json', ...authHeaders(this.apiKey) },
       buildBody: effortFields => {
         const body: Record<string, unknown> = { model: args.model, stream: true, messages: args.messages, ...effortFields };
-        if (args.tools?.length) {
-          body.tools = args.tools;
+        const tools = toChatTools(args.tools ?? []);
+        if (tools.length) {
+          body.tools = tools;
           body.tool_choice = 'auto';
         }
         if (args.streamUsage !== false) body.stream_options = { include_usage: true };

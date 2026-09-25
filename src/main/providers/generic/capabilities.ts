@@ -19,8 +19,12 @@ export interface CapabilityOutcome {
   maxTokens: number | null;
   vision: true | false | 'unknown';
   audio: true | false | 'unknown';
+  hostedSearch: string | null;
   error?: string;
 }
+
+/** Newest first; the dynamic-filtering variant needs a recent Claude model. */
+const ANTHROPIC_SEARCH_TOOLS = ['web_search_20260209', 'web_search_20250305'] as const;
 
 const PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const BLIP_WAV_BASE64 = 'UklGRiYAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQYAAAAA' + 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -59,7 +63,7 @@ export async function runCapabilityProbe(probe: CapabilityProbe): Promise<Capabi
       lastError = error instanceof Error ? error.message : 'Probe failed.';
     }
   }
-  if (failedEfforts.length) return { perEffort, failedEfforts, maxTokens: null, vision: 'unknown', audio: 'unknown', error: lastError };
+  if (failedEfforts.length) return { perEffort, failedEfforts, maxTokens: null, vision: 'unknown', audio: 'unknown', hostedSearch: null, error: lastError };
   const maxTokens = probe.provider.kind === 'anthropic' ? await discoverMaxTokens(probe, targets[0] || undefined, secret) : null;
   const firstEffort = targets[0] || undefined;
   return {
@@ -70,7 +74,29 @@ export async function runCapabilityProbe(probe: CapabilityProbe): Promise<Capabi
     // The Anthropic Messages API has no input-audio block, so audio input is
     // deterministically unsupported there and must not be probed as reachable.
     audio: probe.provider.kind === 'anthropic' ? false : await probeModality(probe, firstEffort, secret, 'audio'),
+    hostedSearch: await probeHostedSearch(probe, firstEffort, secret, maxTokens),
   };
+}
+
+/** Returns the hosted web search tool type that actually ran a search, or null. */
+async function probeHostedSearch(probe: CapabilityProbe, effort: string | undefined, secret: string | null, maxTokens: number | null): Promise<string | null> {
+  if (probe.provider.kind === 'chat-completions') return null;
+  const options = { fetch: probe.fetch, baseUrl: probe.provider.baseUrl, apiKey: secret };
+  const input = [{ role: 'user', content: [{ type: 'input_text', text: 'Search the web for the current UTC date, then reply with it.' }] }];
+  const instructions = 'Use web search before answering.';
+  const candidates = probe.provider.kind === 'anthropic' ? ANTHROPIC_SEARCH_TOOLS : ['web_search'];
+  for (const tool of candidates) {
+    let searched = false;
+    const onWebSearch = () => { searched = true; };
+    try {
+      if (probe.provider.kind === 'anthropic') await new AnthropicClient(options).streamChat({ model: probe.slug, input, instructions, webSearch: tool, maxTokens: maxTokens ?? ANTHROPIC_SAFE_FLOOR, signal: probe.signal, onWebSearch });
+      else await new GenericResponsesClient(options).streamChat({ model: probe.slug, input, instructions, webSearch: true, effort, signal: probe.signal, onWebSearch });
+      if (searched) return tool;
+    } catch {
+      // An unsupported tool type is rejected; try the next variant.
+    }
+  }
+  return null;
 }
 
 async function runBasicPing(probe: CapabilityProbe, effort: string | undefined, secret: string | null): Promise<void> {
@@ -145,7 +171,7 @@ async function probeModality(probe: CapabilityProbe, effort: string | undefined,
         ],
         instructions: probeInstructions(),
         stream: false,
-        ...(effort ? { reasoning_effort: effort } : {}),
+        ...(effort ? { reasoning: { effort } } : {}),
       }
       : {
         model: probe.slug,

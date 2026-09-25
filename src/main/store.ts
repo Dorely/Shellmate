@@ -17,7 +17,7 @@ export class Store {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 2) { this.db.close(); throw new Error('This Shellmate database needs a newer application.'); }
+    if (version > 3) { this.db.close(); throw new Error('This Shellmate database needs a newer application.'); }
     if (version === 0) this.db.transaction(() => {
       this.db.exec(`
         CREATE TABLE workspaces (id TEXT PRIMARY KEY, json TEXT NOT NULL);
@@ -29,9 +29,9 @@ export class Store {
         CREATE TABLE tool_calls (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, name TEXT NOT NULL, args TEXT NOT NULL, status TEXT NOT NULL, result TEXT);
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE turns (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE, status TEXT NOT NULL);
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
       `);
-      const workspace: Workspace = { id: randomUUID(), name: 'Default', createdAt: now() };
+      const workspace: Workspace = { id: randomUUID(), name: 'Default', webAccess: 'ask', createdAt: now() };
       this.db.prepare('INSERT INTO workspaces VALUES (?,?)').run(workspace.id, JSON.stringify(workspace));
       this.db.prepare('INSERT INTO settings VALUES (?,?)').run('workspace-active', workspace.id);
     })();
@@ -40,6 +40,12 @@ export class Store {
       this.db.exec("UPDATE workspace_connections SET access='disabled' WHERE EXISTS (SELECT 1 FROM targets t JOIN conversations c ON c.id=t.conversation_id WHERE c.workspace_id=workspace_connections.workspace_id AND t.connection_id=workspace_connections.connection_id AND t.access='disabled')");
       this.db.exec('DROP TABLE targets');
       this.db.pragma('user_version = 2');
+    })();
+    if (version > 0 && version < 3) this.db.transaction(() => {
+      for (const workspace of this.workspaces()) this.db.prepare('UPDATE workspaces SET json=? WHERE id=?').run(JSON.stringify({ ...workspace, webAccess: 'ask' }), workspace.id);
+      const models: unknown = JSON.parse(this.setting('chat-models', '[]'));
+      if (Array.isArray(models)) this.db.prepare('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('chat-models', JSON.stringify(models.map(model => ({ ...model, hostedSearch: null }))));
+      this.db.pragma('user_version = 3');
     })();
     this.recover();
   }
@@ -60,10 +66,11 @@ export class Store {
   activeWorkspaceId(): string { return this.setting('workspace-active', this.workspaces()[0]?.id); }
   setActiveWorkspace(id: string) { this.workspace(id); this.setSetting('workspace-active', id); }
   createWorkspace(raw: string): Workspace {
-    const workspace: Workspace = { id: randomUUID(), name: name(raw, 60), createdAt: now() };
+    const workspace: Workspace = { id: randomUUID(), name: name(raw, 60), webAccess: 'ask', createdAt: now() };
     this.db.prepare('INSERT INTO workspaces VALUES (?,?)').run(workspace.id, JSON.stringify(workspace)); this.changed(); return workspace;
   }
   renameWorkspace(id: string, raw: string) { const workspace = this.workspace(id); workspace.name = name(raw, 60); this.db.prepare('UPDATE workspaces SET json=? WHERE id=?').run(JSON.stringify(workspace), id); this.changed(); }
+  setWorkspaceWebAccess(id: string, access: AccessMode) { const workspace = this.workspace(id); workspace.webAccess = access; this.db.prepare('UPDATE workspaces SET json=? WHERE id=?').run(JSON.stringify(workspace), id); this.changed(); }
   connections(): ConnectionProfile[] { return this.db.prepare('SELECT json FROM connections ORDER BY rowid').all().map(decode<ConnectionProfile>); }
   connection(id: string): ConnectionProfile { const row = this.db.prepare('SELECT json FROM connections WHERE id=?').get(id); if (!row) throw new Error('Connection not found.'); return decode<ConnectionProfile>(row); }
   saveConnection(profile: ConnectionProfile) {
@@ -107,6 +114,7 @@ export class Store {
     const message: Message = { id: randomUUID(), conversationId, role, text, status, createdAt: now(), targetId, toolName };
     this.db.prepare('INSERT INTO messages VALUES (?,?,?)').run(message.id, conversationId, JSON.stringify(message)); this.changed(); return message;
   }
+  deleteMessage(id: string) { this.db.prepare('DELETE FROM messages WHERE id=?').run(id); this.changed(); }
   updateMessage(message: Message) { this.db.prepare('UPDATE messages SET json=? WHERE id=?').run(JSON.stringify(message), message.id); this.changed(); }
   setTurn(conversationId: string, status: string) { this.db.prepare('INSERT INTO turns VALUES (?,?) ON CONFLICT(conversation_id) DO UPDATE SET status=excluded.status').run(conversationId, status); this.changed(); }
   toolCall(id: string): { id: string; conversationId: string; name: string; args: string; status: string; result: string | null } | null {

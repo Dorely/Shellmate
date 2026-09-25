@@ -17,6 +17,8 @@ export interface ChatModelRecord {
   maxTokens: number | null;
   vision: CapabilityFlag;
   audio: CapabilityFlag;
+  /** Provider-hosted web search tool type that passed the capability probe, or null. */
+  hostedSearch: string | null;
   effortResults: Record<string, 'pass' | 'fail'>;
   lastTestedAt: string;
   testError?: string;

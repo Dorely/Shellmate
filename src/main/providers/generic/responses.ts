@@ -2,16 +2,23 @@ import { redactText } from '../../diagnostics';
 import { ProviderHttpError, ProviderResponseError } from '../errors';
 import { postWithEffortFallback } from './chat';
 import { parseJsonPayload, readSseStream } from './sse';
+import type { WebSource } from '../../../shared/types';
+
+/** A provider-hosted web search step, reported so the chat shows what was searched. */
+export interface WebSearchActivity { query: string; detail?: string }
 
 export interface ResponsesTurnInput {
   model: string;
   input: unknown[];
   instructions: string;
   tools?: unknown[];
+  /** Attach the hosted `web_search` tool. */
+  webSearch?: boolean;
   effort?: string;
   streamUsage?: boolean;
   signal?: AbortSignal;
   onText?: (text: string) => void | Promise<void>;
+  onWebSearch?: (activity: WebSearchActivity) => void | Promise<void>;
 }
 
 export interface ResponsesTurnResult {
@@ -19,6 +26,33 @@ export interface ResponsesTurnResult {
   calls: { id: string; name: string; arguments: string }[];
   usage?: unknown;
   requestId?: string | null;
+  sources: WebSource[];
+}
+
+/** Describes a Responses `web_search_call` output item, or returns null for other items. */
+export function webSearchActivity(item: unknown): WebSearchActivity | null {
+  const value = item as { type?: unknown; status?: unknown; action?: { type?: unknown; query?: unknown; queries?: unknown; url?: unknown; pattern?: unknown } } | null;
+  if (value?.type !== 'web_search_call') return null;
+  const action = value.action ?? {};
+  const detail = typeof value.status === 'string' ? value.status : undefined;
+  if (action.type === 'open_page' && typeof action.url === 'string') return { query: `open ${action.url}`, detail };
+  if (action.type === 'find_in_page' && typeof action.url === 'string') return { query: `find ${JSON.stringify(String(action.pattern ?? ''))} in ${action.url}`, detail };
+  const query = typeof action.query === 'string' ? action.query : Array.isArray(action.queries) ? action.queries.filter(entry => typeof entry === 'string').join(' · ') : '';
+  return { query: query || 'web search', detail };
+}
+
+/** Adds `url_citation` annotations from a Responses message item to the source list. */
+export function collectCitations(item: unknown, sources: Map<string, WebSource>): void {
+  const content = (item as { content?: unknown } | null)?.content;
+  if (!Array.isArray(content)) return;
+  for (const part of content) {
+    const annotations = (part as { annotations?: unknown } | null)?.annotations;
+    if (!Array.isArray(annotations)) continue;
+    for (const annotation of annotations as { type?: unknown; url?: unknown; title?: unknown }[]) {
+      if (annotation?.type !== 'url_citation' || typeof annotation.url !== 'string' || sources.has(annotation.url)) continue;
+      sources.set(annotation.url, { url: annotation.url, ...(typeof annotation.title === 'string' && annotation.title ? { title: annotation.title } : {}) });
+    }
+  }
 }
 
 export interface ResponsesClientOptions {
@@ -82,7 +116,7 @@ export class GenericResponsesClient {
     const headers: Record<string, string> = { accept: 'text/event-stream', 'content-type': 'application/json' };
     if (this.apiKey?.trim()) headers.authorization = `Bearer ${this.apiKey.trim()}`;
     const response = await postWithEffortFallback({
-      kind: 'chat-completions',
+      kind: 'responses',
       effort: args.effort,
       fetchImpl: this.fetcher,
       url: this.chatUrl(),
@@ -95,8 +129,9 @@ export class GenericResponsesClient {
           instructions: args.instructions || 'You are a helpful assistant.',
           ...effortFields,
         };
-        if (args.tools?.length) {
-          body.tools = args.tools;
+        const tools = [...(args.tools ?? []), ...(args.webSearch ? [{ type: 'web_search' }] : [])];
+        if (tools.length) {
+          body.tools = tools;
           body.tool_choice = 'auto';
         }
         if (args.streamUsage !== false) body.stream_options = { include_usage: true };
@@ -146,6 +181,14 @@ export class GenericResponsesClient {
       if (typeof item.id === 'string') calls.set(item.id, call);
       if (typeof item.name === 'string' && item.name) call.name = item.name;
       return call;
+    };
+    const sources = new Map<string, WebSource>();
+    const searches = new Set<string>();
+    const reportSearch = async (item: { id?: unknown }) => {
+      const activity = webSearchActivity(item);
+      if (!activity || (typeof item.id === 'string' && searches.has(item.id))) return;
+      if (typeof item.id === 'string') searches.add(item.id);
+      await args.onWebSearch?.(activity);
     };
     const consume = async (frame: { data: string[] }): Promise<void> => {
       for (const line of frame.data) {
@@ -197,7 +240,8 @@ export class GenericResponsesClient {
               const message = upsertMessage(item, event.output_index);
               const finalText = messageText(item);
               if (finalText) message.text = finalText;
-            }
+              collectCitations(item, sources);
+            } else if (item?.type === 'web_search_call') await reportSearch(item);
             break;
           }
           case 'response.completed':
@@ -223,7 +267,8 @@ export class GenericResponsesClient {
                 const message = upsertMessage(entry, index);
                 const finalText = messageText(entry);
                 if (finalText) message.text = finalText;
-              }
+                collectCitations(entry, sources);
+              } else if (entry?.type === 'web_search_call') await reportSearch(entry);
             }
             break;
           }
@@ -256,6 +301,6 @@ export class GenericResponsesClient {
         output.push({ type: 'function_call', call_id: entry.call.id, name: entry.call.name, arguments: entry.call.arguments });
       }
     }
-    return { output, calls: orderedCalls.map(({ id, name, arguments: callArguments }) => ({ id, name, arguments: callArguments })), usage, requestId };
+    return { output, calls: orderedCalls.map(({ id, name, arguments: callArguments }) => ({ id, name, arguments: callArguments })), usage, requestId, sources: [...sources.values()] };
   }
 }
