@@ -1,20 +1,34 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { url as inspectorUrl } from 'node:inspector';
 import { homedir } from 'node:os';
 import * as pty from 'node-pty';
 import { Client, type ClientChannel } from 'ssh2';
-import type { ConnectionProfile, ElevationRequest, HostKeyRequest, ShellKind, TerminalOwnership, TerminalSnapshot } from '../shared/types';
+import type { ConnectionProfile, ElevationRequest, HostKeyRequest, ShellKind, TerminalIntegration, TerminalOwnership, TerminalSnapshot } from '../shared/types';
 import type { SecureStore } from './providers/secrets';
 import { secretName } from './providers/secrets';
+import { bootstrapLine, commandInput, IntegrationParser, powershellLaunchArgs, type IntegrationEvent } from './shell-integration';
 import type { Store } from './store';
 
 type Backend = { write(data: string): void; resize(cols: number, rows: number): void; close(): void };
-type Command = { id: string; text: string; started: number; capture: string; resolve: (result: CommandResult) => void; completed: Promise<CommandResult> };
+type Command = { id: string; text: string; input: string; capture: string; started: boolean; interrupt: NodeJS.Timeout | null; resolve: (result: CommandResult) => void; completed: Promise<CommandResult> };
 export interface CommandResult { id: string; status: 'completed' | 'failed' | 'running' | 'interrupted'; exitCode: number | null; output: string; truncated: boolean }
-type Session = { id: string; workspaceId: string; connectionId: string; shell: ShellKind; backend: Backend; output: string; seq: number; owner: TerminalOwnership | null; command: Command | null; turnFinished: boolean; error: string | null; elevation: ElevationRequest | null; manualBusy: boolean };
+type ShellState = 'starting' | 'prompt' | 'input' | 'running';
+// A typed bootstrap line whose echo stays hidden until the integrated prompt appears.
+type Bootstrap = { line: string; keepBanner: boolean; before: string; after: string; sent: boolean; quiet: NodeJS.Timeout | null; timer: NodeJS.Timeout | null };
+type Session = {
+  id: string; workspaceId: string; connectionId: string; shell: ShellKind; backend: Backend; output: string; seq: number; owner: TerminalOwnership | null; command: Command | null; turnFinished: boolean; error: string | null;
+  elevation: ElevationRequest | null; elevationCheck: NodeJS.Timeout | null; redact: { text: string; until: number } | null;
+  integration: TerminalIntegration; integrationDetail: string | null; integrationTimer: NodeJS.Timeout | null; parser: IntegrationParser; bootstrap: Bootstrap | null;
+  state: ShellState; cwd: string | null; lastExitCode: number | null; bracketedPaste: boolean;
+};
+type Integration = { integration: TerminalIntegration; detail: string | null; launchArgs: string[]; bootstrap: { line: string; keepBanner: boolean } | null };
 const OUTPUT_LIMIT = 160_000;
 const COMMAND_LIMIT = 32_000;
+const PASSWORD_PROMPT = /(?:^|\n)([^\n]*\b(?:password|passphrase)\b[^\n]*:)[ \t]*$/i;
+// Terminal query replies and focus reports that xterm sends without the user typing.
+const DEVICE_ATTRIBUTES = '\x1b[c';
+const TERMINAL_REPLY = /^(?:\x1B\[(?:[\d;?]*[Rcnt]|[IO]))+$/;
 const limit = (text: string, count: number) => text.length > count ? text.slice(-count) : text;
 const plain = (text: string) => text.replace(/\x1B\[[0-?]*[ -/]*[@-~]|\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '').replace(/\r\n?/g, '\n');
 
@@ -24,34 +38,33 @@ function resolvedShell(profile: ConnectionProfile): ShellKind {
   const executable = profile.localShellPath.toLowerCase();
   if (executable.includes('powershell') || executable.includes('pwsh')) return 'powershell';
   if (executable.includes('cmd')) return 'cmd';
+  if (/(?:bash|zsh|wsl|(?:^|[\\/])sh)(?:\.exe)?$/.test(executable)) return 'posix';
   return process.platform === 'win32' ? 'powershell' : 'posix';
 }
-function wrapper(shell: ShellKind, text: string, id: string): string {
-  const start = `__SHELLMATE_START_${id}__`;
-  const end = `__SHELLMATE_END_${id}__`;
-  if (shell === 'powershell') {
-    const escaped = text.replace(/'/g, "''");
-    return `Write-Output '${start}'; $global:LASTEXITCODE=$null; try { & ([scriptblock]::Create('${escaped}')); $__sm_code=if($LASTEXITCODE -is [int]){$LASTEXITCODE}elseif($?){0}else{1} } catch { Write-Error $_; $__sm_code=1 }; Write-Output ('${end}:'+$__sm_code)\r`;
+function integrationFor(profile: ConnectionProfile, shell: ShellKind, nonce: string, winpty: boolean): Integration {
+  const none = (integration: TerminalIntegration, detail: string): Integration => ({ integration, detail, launchArgs: [], bootstrap: null });
+  if (shell === 'cmd') return none('unsupported', 'cmd.exe cannot report command boundaries. Use PowerShell or a POSIX shell for agent commands.');
+  if (winpty) return none('unavailable', 'The debugger PTY backend (winpty) strips shell integration sequences.');
+  if (shell === 'powershell' && profile.kind === 'local') {
+    const args = profile.localShellArgs.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+    if (args.some(arg => /^[-/](?:c|co|com\w*|e|ec|en\w*|f|fi|fil|file)$/i.test(arg))) return none('unavailable', 'Custom -Command or -File shell arguments prevent shell integration.');
+    return { integration: 'pending', detail: null, launchArgs: powershellLaunchArgs(nonce), bootstrap: null };
   }
-  if (shell === 'cmd') {
-    const command = text.replace(/\r?\n/g, ' & ');
-    return `echo ${start}\r${command}\rset "__sm_code=%ERRORLEVEL%"\rcall echo ${end}:%%__sm_code%%\r`;
-  }
-  const delimiter = `__SHELLMATE_SCRIPT_${id}__`;
-  const body = text.replace(/\r\n?/g, '\n');
-  if (body.split('\n').includes(delimiter)) throw new Error('Command contains a reserved shell delimiter.');
-  return `__sm_file="$(mktemp)"; chmod 700 "$__sm_file"; cat > "$__sm_file" <<'${delimiter}'\n${body}\n${delimiter}\nprintf '\\n${start}\\n'; sh "$__sm_file"; __sm_code=$?; rm -f "$__sm_file"; printf '\\n${end}:%s\\n' "$__sm_code"\n`;
+  // ConPTY (local shells and Windows SSH servers) repaints its own buffer, so those bootstraps clear the screen.
+  const clear = profile.kind === 'local' || shell === 'powershell';
+  return { integration: 'pending', detail: null, launchArgs: [], bootstrap: { line: bootstrapLine(shell === 'powershell' ? 'powershell' : 'posix', nonce, clear), keepBanner: !clear } };
 }
-function commandStatus(capture: string, id: string): { output: string; exitCode: number } | null {
-  const output = plain(capture);
-  const start = output.indexOf(`\n__SHELLMATE_START_${id}__\n`);
-  const endPattern = new RegExp(`\\n__SHELLMATE_END_${id}__:(\\d+)\\n`);
-  if (start < 0) return null;
-  const afterStart = start + `\n__SHELLMATE_START_${id}__\n`.length;
-  const rest = output.slice(afterStart);
-  const end = endPattern.exec(rest);
-  if (!end) return null;
-  return { output: rest.slice(0, end.index).trim(), exitCode: Number(end[1]) };
+// Without a command-start mark, drop the echoed input (including continuation prompts) from the captured output.
+function withoutEcho(output: string, input: string): string {
+  const wanted = plain(input).replace(/\s+/g, ''); let i = 0; let j = 0;
+  while (i < output.length && j < wanted.length) {
+    if (/\s/.test(output[i])) { i++; continue; }
+    if (output[i] === wanted[j]) { i++; j++; continue; }
+    if (output[i] === '>') { i++; continue; }
+    break;
+  }
+  const newline = output.indexOf('\n', j === wanted.length ? i : 0);
+  return newline < 0 ? (j === wanted.length ? '' : output) : output.slice(newline + 1);
 }
 
 export class TerminalManager {
@@ -60,9 +73,13 @@ export class TerminalManager {
   private hostKeys = new Map<string, HostKeyRequest>();
   constructor(private store: Store, private secrets: SecureStore, private changed: () => void, private onOutput: (event: { id: string; seq: number; data: string }) => void) {}
   private key(workspaceId: string, connectionId: string) { return `${workspaceId}:${connectionId}`; }
+  private alive(s: Session) { return this.sessions.get(this.key(s.workspaceId, s.connectionId)) === s; }
   session(workspaceId: string, connectionId: string): Session | null { return this.sessions.get(this.key(workspaceId, connectionId)) ?? null; }
   snapshots(workspaceId: string): TerminalSnapshot[] { return [...this.sessions.values()].filter(s => s.workspaceId === workspaceId).map(s => this.snapshot(s)); }
-  snapshot(s: Session): TerminalSnapshot { return { id: s.id, workspaceId: s.workspaceId, connectionId: s.connectionId, connected: true, output: s.output, seq: s.seq, shell: s.shell, owner: s.owner, activeCommand: s.command?.text ?? null, error: s.error }; }
+  snapshot(s: Session): TerminalSnapshot {
+    return { id: s.id, workspaceId: s.workspaceId, connectionId: s.connectionId, connected: true, output: s.output, seq: s.seq, shell: s.shell, owner: s.owner, activeCommand: s.command?.text ?? null, error: s.error,
+      integration: s.integration, integrationDetail: s.integrationDetail, busy: s.state === 'running', cwd: s.cwd, lastExitCode: s.lastExitCode };
+  }
   pendingHostKeys(): HostKeyRequest[] { return [...this.hostKeys.values()]; }
   pendingElevations(): ElevationRequest[] { return [...this.sessions.values()].flatMap(s => s.elevation ? [s.elevation] : []); }
   async connect(workspaceId: string, connectionId: string): Promise<TerminalSnapshot> {
@@ -77,26 +94,36 @@ export class TerminalManager {
   private async connectFresh(workspaceId: string, connectionId: string): Promise<TerminalSnapshot> {
     const profile = this.store.connection(connectionId);
     const shell = resolvedShell(profile);
+    // ConPTY can block pty.spawn inside a Windows debugger, freezing Electron's main thread.
+    const winpty = profile.kind === 'local' && process.platform === 'win32' && (process.env.SHELLMATE_DEBUG_PTY === 'winpty' || Boolean(inspectorUrl()));
+    const nonce = randomBytes(8).toString('hex');
+    const integration = integrationFor(profile, shell, nonce, winpty);
     let session: Session | null = null;
     let earlyOutput = '';
     let earlyClose: string | null = null;
     const output = (data: string) => { if (session) this.receive(session, data); else earlyOutput += data; };
     const closed = (reason: string) => { if (session) this.exited(workspaceId, connectionId, reason); else earlyClose = reason; };
-    const backend = profile.kind === 'local' ? this.openLocal(profile, output, closed) : await this.openSsh(workspaceId, profile, output, closed);
+    const backend = profile.kind === 'local' ? this.openLocal(profile, integration.launchArgs, winpty, output, closed) : await this.openSsh(workspaceId, profile, output, closed);
     if (earlyClose || !this.store.hasWorkspaceConnection(workspaceId, connectionId) || this.store.connection(connectionId).updatedAt !== profile.updatedAt) {
       backend.close(); throw new Error(earlyClose ?? 'Connection changed while opening. Connect again.');
     }
-    session = { id: randomUUID(), workspaceId, connectionId, shell, backend, output: '', seq: 0, owner: null, command: null, turnFinished: false, error: null, elevation: null, manualBusy: false };
+    session = { id: randomUUID(), workspaceId, connectionId, shell, backend, output: '', seq: 0, owner: null, command: null, turnFinished: false, error: null,
+      elevation: null, elevationCheck: null, redact: null, integration: integration.integration, integrationDetail: integration.detail, integrationTimer: null,
+      parser: new IntegrationParser(nonce), bootstrap: null, state: 'starting', cwd: null, lastExitCode: null, bracketedPaste: false };
     this.sessions.set(this.key(workspaceId, connectionId), session); this.changed();
+    if (integration.bootstrap) this.beginBootstrap(session, integration.bootstrap.line, integration.bootstrap.keepBanner);
+    else if (integration.integration === 'pending') {
+      const s = session;
+      s.integrationTimer = setTimeout(() => this.integrationFailed(s, 'No integrated prompt appeared. A profile or custom prompt may have replaced it.'), 20_000);
+    }
     if (earlyOutput) this.receive(session, earlyOutput);
     return this.snapshot(session);
   }
-  private openLocal(profile: ConnectionProfile, output: (data: string) => void, closed: (reason: string) => void): Backend {
+  private openLocal(profile: ConnectionProfile, launchArgs: string[], winpty: boolean, output: (data: string) => void, closed: (reason: string) => void): Backend {
     const command = profile.localShellPath.trim() || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh');
     const args = profile.localShellArgs.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(value => value.replace(/^"|"$/g, '')) ?? [];
-    // ConPTY can block pty.spawn inside a Windows debugger, freezing Electron's main thread.
-    const debugPty = process.platform === 'win32' && (process.env.SHELLMATE_DEBUG_PTY === 'winpty' || Boolean(inspectorUrl()));
-    const terminal = pty.spawn(command, args, { cols: 100, rows: 30, cwd: profile.localCwd.trim() || homedir(), env: { ...process.env, TERM: 'xterm-256color' }, ...(debugPty ? { useConpty: false } : {}) });
+    const userArgs = launchArgs.length ? args.filter(arg => !/^[-/]noe(?:x(?:it?)?)?$/i.test(arg)) : args;
+    const terminal = pty.spawn(command, [...userArgs, ...launchArgs], { cols: 100, rows: 30, cwd: profile.localCwd.trim() || homedir(), env: { ...process.env, TERM: 'xterm-256color' }, ...(winpty ? { useConpty: false } : { useConptyDll: true }) });
     terminal.onData(output);
     terminal.onExit(() => closed('Local shell exited.'));
     return { write: data => terminal.write(data), resize: (cols, rows) => terminal.resize(cols, rows), close: () => terminal.kill() };
@@ -136,15 +163,18 @@ export class TerminalManager {
     if (allow) { const profile = this.store.connection(request.connectionId); if (profile.host !== request.host || profile.port !== request.port) throw new Error('Connection changed while awaiting host-key trust.'); profile.trustedHostKey = request.fingerprint; profile.updatedAt = new Date().toISOString(); this.store.saveConnection(profile); }
     this.changed(); return request;
   }
+  private release(s: Session) {
+    for (const timer of [s.integrationTimer, s.elevationCheck, s.bootstrap?.quiet, s.bootstrap?.timer, s.command?.interrupt]) if (timer) clearTimeout(timer);
+    if (s.command) s.command.resolve({ id: s.command.id, status: 'interrupted', exitCode: null, output: '', truncated: false });
+  }
   private exited(workspaceId: string, connectionId: string, reason: string) {
     const key = this.key(workspaceId, connectionId); const s = this.sessions.get(key); if (!s) return;
-    this.sessions.delete(key); s.error = reason; if (s.command) s.command.resolve({ id: s.command.id, status: 'interrupted', exitCode: null, output: '', truncated: false }); this.changed();
+    this.sessions.delete(key); s.error = reason; this.release(s); this.changed();
   }
   disconnect(workspaceId: string, connectionId: string, force = false) {
     const s = this.session(workspaceId, connectionId); if (!s) return;
     if (s.owner && s.owner.phase !== 'returning-control' && !force) throw new Error('Take over this terminal before disconnecting.');
-    this.sessions.delete(this.key(workspaceId, connectionId)); s.backend.close();
-    if (s.command) s.command.resolve({ id: s.command.id, status: 'interrupted', exitCode: null, output: '', truncated: false }); this.changed();
+    this.sessions.delete(this.key(workspaceId, connectionId)); s.backend.close(); this.release(s); this.changed();
   }
   disconnectProfile(connectionId: string) { for (const s of [...this.sessions.values()]) if (s.connectionId === connectionId) this.disconnect(s.workspaceId, connectionId, true); }
   shutdown() { for (const s of [...this.sessions.values()]) this.disconnect(s.workspaceId, s.connectionId, true); }
@@ -156,14 +186,15 @@ export class TerminalManager {
   write(workspaceId: string, connectionId: string, data: string) {
     const s = this.session(workspaceId, connectionId); if (!s) throw new Error('Terminal is disconnected.');
     if (s.owner) throw new Error('Agent controls this terminal. Use Take over first.');
+    if (s.bootstrap) throw new Error('Shell integration is starting.');
     if (!data || data.length > 16_000) throw new Error('Invalid terminal input.');
-    if (data.includes('\r') || data.includes('\n')) s.manualBusy = true;
+    if ((s.state === 'prompt' || s.state === 'input') && !TERMINAL_REPLY.test(data)) this.setState(s, /[\r\n]/.test(data) ? 'running' : 'input');
     s.backend.write(data);
   }
   acquire(workspaceId: string, connectionId: string, conversationId: string): Session {
     const s = this.session(workspaceId, connectionId); if (!s) throw new Error('Connect this terminal first.');
     if (s.owner && s.owner.conversationId !== conversationId) throw new Error('Terminal is in use by another conversation.');
-    if (s.manualBusy && !s.owner) throw new Error('The user’s terminal command may still be running. Wait for its prompt or reconnect.');
+    if (!s.owner && s.state === 'running') throw new Error('The user’s terminal command is still running. Wait for its prompt.');
     if (!s.owner) { s.owner = { conversationId, phase: 'working' }; s.turnFinished = false; this.changed(); }
     return s;
   }
@@ -171,51 +202,166 @@ export class TerminalManager {
   takeOver(workspaceId: string, connectionId: string): string | null {
     const s = this.session(workspaceId, connectionId); if (!s?.owner) return null;
     const conversationId = s.owner.conversationId; s.turnFinished = true;
-    if (s.command) { s.owner.phase = 'returning-control'; s.backend.write('\x03'); }
-    else s.owner = null;
-    this.changed(); return conversationId;
-  }
-  private receive(s: Session, data: string) {
-    if (!this.sessions.has(this.key(s.workspaceId, s.connectionId))) return;
-    s.seq++; s.output = limit(s.output + data, OUTPUT_LIMIT); this.onOutput({ id: s.id, seq: s.seq, data });
-    if (s.manualBusy && /(?:^|\n)[^\n]*[#$>] ?$/.test(plain(s.output.slice(-300)))) s.manualBusy = false;
     const command = s.command;
     if (command) {
-      command.capture = limit(command.capture + data, COMMAND_LIMIT * 3);
-      const finished = commandStatus(command.capture, command.id);
-      if (finished) {
-        const result: CommandResult = { id: command.id, status: finished.exitCode === 0 ? 'completed' : 'failed', exitCode: finished.exitCode, output: limit(finished.output, COMMAND_LIMIT), truncated: finished.output.length > COMMAND_LIMIT };
-        s.command = null; s.elevation = null;
-        if (s.turnFinished || s.owner?.phase === 'returning-control') s.owner = null;
-        else if (s.owner) { s.owner.phase = 'working'; s.owner.command = undefined; }
-        command.resolve(result); this.changed();
-      } else if (!s.elevation && /(?:\[sudo\]\s*)?password(?: for [^:\n]+)?:\s*$/i.test(plain(data))) {
-        s.elevation = { id: randomUUID(), sessionId: s.id, connectionId: s.connectionId, command: command.text, prompt: 'Password requested by terminal' }; this.changed();
-      }
+      s.owner.phase = 'returning-control'; this.clearElevation(s); s.backend.write('\x03');
+      // A program that ignores the interrupt still returns control to the user.
+      command.interrupt = setTimeout(() => {
+        if (s.command !== command) return;
+        s.command = null; s.owner = null;
+        command.resolve({ id: command.id, status: 'interrupted', exitCode: null, output: limit(plain(command.capture), COMMAND_LIMIT), truncated: false }); this.changed();
+      }, 3_000);
+    } else s.owner = null;
+    this.changed(); return conversationId;
+  }
+  private setState(s: Session, state: ShellState) {
+    if (s.state === state) return;
+    const busy = s.state === 'running'; s.state = state;
+    if (busy !== (state === 'running')) this.changed();
+  }
+  private integrationFailed(s: Session, detail: string) {
+    if (!this.alive(s) || s.integration !== 'pending') return;
+    s.integration = 'unavailable'; s.integrationDetail = detail; s.integrationTimer = null; this.changed();
+  }
+  private beginBootstrap(s: Session, line: string, keepBanner: boolean) {
+    const b: Bootstrap = { line, keepBanner, before: '', after: '', sent: false, quiet: null, timer: null };
+    s.bootstrap = b;
+    b.timer = setTimeout(() => this.sendBootstrap(s), 10_000);
+  }
+  // Wait for the login banner and first prompt to settle, then type the bootstrap line.
+  private sendBootstrap(s: Session) {
+    const b = s.bootstrap; if (!b || b.sent || !this.alive(s)) return;
+    for (const timer of [b.quiet, b.timer]) if (timer) clearTimeout(timer);
+    b.sent = true; b.quiet = null;
+    b.timer = setTimeout(() => {
+      if (s.bootstrap !== b) return;
+      s.bootstrap = null; this.integrationFailed(s, 'The shell did not accept the integration bootstrap. It may not be a PowerShell or POSIX shell.');
+      this.deliver(s, b.before + b.after, []);
+    }, 8_000);
+    s.backend.write(b.line);
+  }
+  private receive(s: Session, data: string) {
+    if (!this.alive(s)) return;
+    const { text, events } = s.parser.feed(data);
+    const pasteOn = text.lastIndexOf('\x1b[?2004h'); const pasteOff = text.lastIndexOf('\x1b[?2004l');
+    if (pasteOn !== pasteOff) s.bracketedPaste = pasteOn > pasteOff;
+    const b = s.bootstrap;
+    if (!b) { this.deliver(s, text, events); return; }
+    if (!b.sent) {
+      // Held output never reaches xterm, so answer ConPTY's startup device-attributes query here.
+      if (text.includes(DEVICE_ATTRIBUTES)) s.backend.write('\x1b[?1;2c');
+      b.before += text.split(DEVICE_ATTRIBUTES).join('');
+      if (!plain(b.before).trim()) return;
+      if (b.quiet) clearTimeout(b.quiet);
+      b.quiet = setTimeout(() => this.sendBootstrap(s), 400);
+      return;
     }
+    for (const event of events) if (event.kind === 'P') s.cwd = event.arg || null;
+    const prompt = events.find(event => event.kind === 'A');
+    if (!prompt) { b.after = limit(b.after + text, OUTPUT_LIMIT); return; }
+    // Show the banner without the pre-integration prompt line, then continue from the integrated prompt.
+    if (b.timer) clearTimeout(b.timer);
+    s.bootstrap = null;
+    const cut = b.before.lastIndexOf('\n');
+    const banner = b.keepBanner && cut >= 0 ? b.before.slice(0, cut + 1) : '';
+    this.deliver(s, banner + text.slice(prompt.index), events.filter(event => event.index >= prompt.index).map(event => ({ ...event, index: event.index - prompt.index + banner.length })));
+  }
+  private deliver(s: Session, text: string, events: IntegrationEvent[]) {
+    let visible = ''; let from = 0;
+    const take = (to: number) => {
+      const segment = this.redacted(s, text.slice(from, to)); from = to;
+      if (!segment) return;
+      visible += segment;
+      if (s.command) s.command.capture = limit(s.command.capture + segment, COMMAND_LIMIT * 3);
+    };
+    for (const event of events) { take(event.index); this.event(s, event); }
+    take(text.length);
+    if (!visible) return;
+    s.seq++; s.output = limit(s.output + visible, OUTPUT_LIMIT); this.onOutput({ id: s.id, seq: s.seq, data: visible });
+    this.clearElevation(s);
+    if (s.command) this.checkElevation(s);
+  }
+  private event(s: Session, event: IntegrationEvent) {
+    if (event.kind === 'P') { s.cwd = event.arg || null; return; }
+    if (event.kind === 'A' || event.kind === 'B') {
+      if (s.integration === 'pending') { if (s.integrationTimer) clearTimeout(s.integrationTimer); s.integration = 'ready'; s.integrationDetail = null; s.integrationTimer = null; this.changed(); }
+      if (!s.command) this.setState(s, 'prompt');
+      return;
+    }
+    const command = s.command;
+    if (event.kind === 'C') {
+      this.setState(s, 'running');
+      if (command) { command.capture = ''; command.started = true; }
+      return;
+    }
+    const code = /^-?\d+$/.test(event.arg) ? Number(event.arg) : null;
+    // A prompt redraw before the command line was accepted is not a completion.
+    if (command && (command.started || command.capture.includes('\n'))) this.finish(s, command, code);
+    else if (!command && s.state === 'running') s.lastExitCode = code;
+    if (!s.command) this.setState(s, 'prompt');
+  }
+  private finish(s: Session, command: Command, exitCode: number | null) {
+    let output = plain(command.capture);
+    if (!command.started) output = withoutEcho(output, command.input);
+    output = output.trim();
+    const result: CommandResult = { id: command.id, status: exitCode === 0 ? 'completed' : 'failed', exitCode, output: limit(output, COMMAND_LIMIT), truncated: output.length > COMMAND_LIMIT };
+    if (command.interrupt) clearTimeout(command.interrupt);
+    s.command = null; s.lastExitCode = exitCode; s.redact = null; this.clearElevation(s);
+    if (s.turnFinished || s.owner?.phase === 'returning-control') s.owner = null;
+    else if (s.owner) { s.owner.phase = 'working'; s.owner.command = undefined; }
+    command.resolve(result); this.changed();
+  }
+  private redacted(s: Session, text: string): string {
+    if (!s.redact) return text;
+    if (Date.now() > s.redact.until) { s.redact = null; return text; }
+    return text.split(s.redact.text).join('********');
+  }
+  private clearElevation(s: Session) {
+    if (s.elevationCheck) { clearTimeout(s.elevationCheck); s.elevationCheck = null; }
+    if (s.elevation) { s.elevation = null; this.changed(); }
+  }
+  // Raise a password request only when a running command's output has settled on a password prompt.
+  private checkElevation(s: Session) {
+    s.elevationCheck = setTimeout(() => {
+      s.elevationCheck = null;
+      const command = s.command; if (!command || s.elevation || !this.alive(s)) return;
+      const match = PASSWORD_PROMPT.exec(plain(command.capture).slice(-300)); if (!match) return;
+      s.elevation = { id: randomUUID(), sessionId: s.id, connectionId: s.connectionId, command: command.text, prompt: match[1].trim().slice(-200) }; this.changed();
+    }, 250);
   }
   respondElevation(id: string, password: string | null) {
     const s = [...this.sessions.values()].find(session => session.elevation?.id === id);
     if (!s) throw new Error('Password prompt expired.');
-    s.elevation = null;
-    if (password === null) s.backend.write('\x03');
-    else { if (!password || password.length > 1024) throw new Error('Invalid password.'); s.backend.write(`${password}\r`); }
-    this.changed();
+    if (password !== null && (!password || password.length > 1024 || /[\x00-\x1f\x7f]/.test(password))) throw new Error('Invalid password.');
+    this.clearElevation(s);
+    if (password === null) { s.backend.write('\x03'); return; }
+    // Guard against programs that echo their input: mask the password in output that follows shortly.
+    if (password.length >= 4) s.redact = { text: password, until: Date.now() + 5_000 };
+    s.backend.write(`${password}\r`);
+  }
+  private ready(s: Session) {
+    if (s.integration === 'pending') throw new Error('Shell integration is still starting. Wait a moment, then retry.');
+    if (s.integration !== 'ready') throw new Error(`Agent commands are unavailable in this terminal. ${s.integrationDetail ?? ''}`.trim());
+    if (s.state === 'input') throw new Error('The user has unsent input at the prompt. Ask them to submit or clear it.');
+    if (s.state !== 'prompt') throw new Error('The shell is still running a previous command. Wait for its prompt.');
   }
   async execute(s: Session, commandText: string, timeoutSeconds: number, signal: AbortSignal): Promise<CommandResult> {
-    if (!s.owner || s.command) throw new Error('Terminal is unavailable for a new command.');
+    if (!s.owner) throw new Error('Terminal is unavailable for a new command.');
+    if (s.command) throw new Error('A previous command is still running. Wait for it or read the terminal.');
     if (!commandText.trim() || commandText.length > 16_000) throw new Error('Command must contain 1–16,000 characters.');
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(commandText)) throw new Error('Command must not contain control characters.');
+    this.ready(s);
     const id = randomUUID();
     let resolve!: (result: CommandResult) => void;
     const completed = new Promise<CommandResult>(r => { resolve = r; });
-    const command: Command = { id, text: commandText, started: Date.now(), capture: '', resolve, completed };
-    const payload = wrapper(s.shell, commandText, id);
-    s.command = command; s.owner.phase = 'command-running'; s.owner.command = commandText; this.changed();
-    s.backend.write(payload);
+    const input = commandInput(s.shell === 'powershell' ? 'powershell' : 'posix', commandText, s.bracketedPaste);
+    const command: Command = { id, text: commandText, input, capture: '', started: false, interrupt: null, resolve, completed };
+    s.command = command; this.setState(s, 'running'); s.owner.phase = 'command-running'; s.owner.command = commandText; this.changed();
+    s.backend.write(input);
     const timeout = Math.min(120, Math.max(1, timeoutSeconds));
     return await Promise.race([completed, new Promise<CommandResult>((done, reject) => {
       const timer = setTimeout(() => done({ id, status: 'running', exitCode: null, output: limit(plain(command.capture), COMMAND_LIMIT), truncated: command.capture.length > COMMAND_LIMIT }), timeout * 1000);
-      completed.finally(() => clearTimeout(timer));
+      void completed.finally(() => clearTimeout(timer));
       signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped while command continues.')); }, { once: true });
     })]);
   }

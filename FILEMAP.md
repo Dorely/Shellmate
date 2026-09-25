@@ -18,7 +18,8 @@ Read this map at the start of each development session. Generated output, depend
 | `src/main/index.ts` | Electron lifecycle, secure storage, provider wiring, validated operations, and app snapshots. |
 | `src/main/browser-host.ts` | Loopback browser development host, static renderer delivery, authenticated operation bridge, and events. |
 | `src/main/store.ts` | Fresh SQLite schema, workspace/connection/note/conversation persistence, tool ledger, and restart recovery. |
-| `src/main/terminal.ts` | Local PTY/SSH sessions, host-key trust, terminal output, command boundaries, elevation prompts, and ownership. |
+| `src/main/terminal.ts` | Local PTY/SSH sessions, host-key trust, integration bootstrap, shell state, command execution, elevation prompts, and ownership. |
+| `src/main/shell-integration.ts` | PowerShell/bash/zsh/sh prompt hooks, bootstrap lines, command keystrokes, and the nonce-tagged OSC parser. |
 | `src/main/chat-service.ts`, `src/main/assistant.ts` | Persistent streaming turns, workspace-scoped tools/approvals, prompt, cancellation, and context accounting. |
 | `src/main/chat-registry.ts`, `src/main/chat-context.ts` | Provider/model registry, selection, capability testing, and token estimates. |
 | `src/main/diagnostics.ts` | Redacted local diagnostics. |

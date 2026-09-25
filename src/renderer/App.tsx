@@ -10,6 +10,8 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : '
 const emptyConnection = (): ConnectionInput => ({ name: '', kind: 'ssh', host: '', port: 22, username: '', auth: 'password', privateKeyPath: '', shell: 'auto', localShellPath: '', localShellArgs: '', localCwd: '' });
 const connectionInput = (value: ConnectionSummary): ConnectionInput => ({ id: value.id, name: value.name, kind: value.kind, host: value.host, port: value.port, username: value.username, auth: value.auth, privateKeyPath: value.privateKeyPath, shell: value.shell, localShellPath: value.localShellPath, localShellArgs: value.localShellArgs, localCwd: value.localCwd });
 
+const integrationLabel: Record<TerminalSnapshot['integration'], string> = { ready: '', pending: ' · integration starting', unavailable: ' · agent commands unavailable', unsupported: ' · manual only' };
+
 function TerminalPane({ profile, session, theme, onConnect, onDisconnect, onTakeOver }: { profile: ConnectionSummary; session?: TerminalSnapshot; theme: ThemeName; onConnect: () => void; onDisconnect: () => void; onTakeOver: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
@@ -34,7 +36,7 @@ function TerminalPane({ profile, session, theme, onConnect, onDisconnect, onTake
     </div>
     {session ? <><div ref={host} className="terminal-canvas" aria-label={`${profile.name} terminal`} /><div className={`terminal-ownership ${session.owner ? 'owned' : ''}`}>
       {session.owner ? <><span className="agent-mark">✦</span> <span>Agent controlling · {session.owner.phase === 'command-running' ? 'Command running' : session.owner.phase === 'returning-control' ? 'Returning control…' : 'Working'}</span><span className="fill" /><button onClick={onTakeOver}>Take over</button></>
-        : <><span className="status-dot on" /> You have control<span className="fill" /><span className="subtle">{session.shell}</span></>}
+        : <><span className="status-dot on" /> You have control<span className="fill" /><span className="subtle" title={session.integrationDetail ?? undefined}>{session.shell}{integrationLabel[session.integration]}</span></>}
     </div></> : <div className="terminal-empty"><div className="terminal-empty-icon">⌘</div><strong>Terminal disconnected</strong><span>This connection is available to workspace chats according to its access setting.</span><button className="primary" onClick={onConnect}>Connect {profile.name}</button></div>}
   </div>;
 }
@@ -181,5 +183,5 @@ export default function App() {
 
 function ElevationDialog({ request, act }: { request: Snapshot['elevations'][number]; act: (action: () => Promise<unknown>) => Promise<unknown> }) {
   const [password, setPassword] = useState('');
-  return <div className="modal-backdrop"><div className="dialog attention-dialog" role="dialog" aria-modal="true" aria-label="Terminal password request"><h2>Terminal password requested</h2><p>The command in this terminal is waiting for a password.</p><pre>{request.command}</pre><input autoFocus type="password" aria-label="Terminal password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void act(() => api().respondElevation(request.id, password)); }} /><div className="dialog-actions"><button onClick={() => void act(() => api().respondElevation(request.id, null))}>Cancel command</button><span className="fill" /><button className="primary" onClick={() => void act(() => api().respondElevation(request.id, password))}>Send to terminal</button></div></div></div>;
+  return <div className="modal-backdrop"><div className="dialog attention-dialog" role="dialog" aria-modal="true" aria-label="Terminal password request"><h2>Terminal password requested</h2><p>The agent’s command is waiting at this terminal prompt:</p><code>{request.prompt}</code><pre>{request.command}</pre><input autoFocus type="password" aria-label="Terminal password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void act(() => api().respondElevation(request.id, password)); }} /><div className="dialog-actions"><button onClick={() => void act(() => api().respondElevation(request.id, null))}>Cancel command</button><span className="fill" /><button className="primary" onClick={() => void act(() => api().respondElevation(request.id, password))}>Send to terminal</button></div></div></div>;
 }

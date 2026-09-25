@@ -19,7 +19,8 @@ export interface Conversation { id: string; workspaceId: string; title: string; 
 export interface WorkspaceConnectionAccess { connectionId: string; access: AccessMode }
 export interface Message { id: string; conversationId: string; role: 'user' | 'assistant' | 'tool'; text: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; createdAt: string; targetId?: string; toolName?: string }
 export interface TerminalOwnership { conversationId: string; phase: 'working' | 'command-running' | 'returning-control'; command?: string }
-export interface TerminalSnapshot { id: string; workspaceId: string; connectionId: string; connected: boolean; output: string; seq: number; shell: ShellKind; owner: TerminalOwnership | null; activeCommand: string | null; error: string | null }
+export type TerminalIntegration = 'pending' | 'ready' | 'unavailable' | 'unsupported';
+export interface TerminalSnapshot { id: string; workspaceId: string; connectionId: string; connected: boolean; output: string; seq: number; shell: ShellKind; owner: TerminalOwnership | null; activeCommand: string | null; error: string | null; integration: TerminalIntegration; integrationDetail: string | null; busy: boolean; cwd: string | null; lastExitCode: number | null }
 export interface ApprovalRequest { id: string; conversationId: string; workspaceId: string; connectionId: string; sessionId: string; command: string; createdAt: string }
 export interface HostKeyRequest { id: string; workspaceId: string; connectionId: string; host: string; port: number; fingerprint: string; changed: boolean }
 export interface ElevationRequest { id: string; sessionId: string; connectionId: string; command: string; prompt: string }
