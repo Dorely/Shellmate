@@ -11,7 +11,7 @@ export interface StreamChatInput { token: string; model?: string; input: unknown
 export interface StreamChatResult { output: any[]; calls: { id: string; name: string; arguments: string }[]; usage?: unknown; requestId?: string | null }
 export interface CodexClientOptions { fetch?: typeof globalThis.fetch; endpoint?: string }
 
-function accountId(token: string): string {
+export function accountId(token: string): string {
   const parts = token.split('.');
   if (parts.length !== 3) throw new Error('Codex token is invalid.');
   try {

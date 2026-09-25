@@ -19,9 +19,9 @@ The application should prioritize transparency, safety, and user control. The ag
 The application should:
 
 * Manage SSH connections and eventually remote desktop-style connections in one organized interface.
-* Group reusable connections into workspaces, and let a conversation explicitly target one or more machines.
+* Group reusable connections into workspaces, and let conversations see the workspace's connections with clear agent access settings.
 * Provide a main workspace with the remote terminal or desktop view alongside an agent chat.
-* Let users target one or more configured connections and ask an LLM agent to perform actions on those systems.
+* Let users set workspace connection permissions and ask an LLM agent to perform actions on those systems.
 * Treat OpenAI as a first-class provider while supporting any OpenAI API-compatible LLM endpoint.
 * Allow users to configure what access, tools, credentials, and remote capabilities are available to the agent.
 * Give the agent access to user-visible notes for each connection.

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import type { AccessMode, ConnectionProfile, Conversation, ConversationTarget, Message, Note, Workspace } from '../shared/types';
+import type { AccessMode, ConnectionProfile, Conversation, Message, Note, Workspace, WorkspaceConnectionAccess } from '../shared/types';
 
 const now = () => new Date().toISOString();
 const decode = <T>(row: unknown): T => JSON.parse((row as { json: string }).json) as T;
@@ -17,24 +17,29 @@ export class Store {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 1) { this.db.close(); throw new Error('This Shellmate database needs a newer application.'); }
+    if (version > 2) { this.db.close(); throw new Error('This Shellmate database needs a newer application.'); }
     if (version === 0) this.db.transaction(() => {
       this.db.exec(`
         CREATE TABLE workspaces (id TEXT PRIMARY KEY, json TEXT NOT NULL);
         CREATE TABLE connections (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-        CREATE TABLE workspace_connections (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, PRIMARY KEY(workspace_id, connection_id));
+        CREATE TABLE workspace_connections (workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, access TEXT NOT NULL DEFAULT 'ask', PRIMARY KEY(workspace_id, connection_id));
         CREATE TABLE notes (id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, title_key TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(connection_id,title_key));
         CREATE TABLE conversations (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), json TEXT NOT NULL);
-        CREATE TABLE targets (conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE, access TEXT NOT NULL, PRIMARY KEY(conversation_id,connection_id));
         CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, json TEXT NOT NULL);
         CREATE TABLE tool_calls (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, name TEXT NOT NULL, args TEXT NOT NULL, status TEXT NOT NULL, result TEXT);
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE turns (conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE, status TEXT NOT NULL);
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
       `);
       const workspace: Workspace = { id: randomUUID(), name: 'Default', createdAt: now() };
       this.db.prepare('INSERT INTO workspaces VALUES (?,?)').run(workspace.id, JSON.stringify(workspace));
       this.db.prepare('INSERT INTO settings VALUES (?,?)').run('workspace-active', workspace.id);
+    })();
+    if (version === 1) this.db.transaction(() => {
+      this.db.exec("ALTER TABLE workspace_connections ADD COLUMN access TEXT NOT NULL DEFAULT 'ask'");
+      this.db.exec("UPDATE workspace_connections SET access='disabled' WHERE EXISTS (SELECT 1 FROM targets t JOIN conversations c ON c.id=t.conversation_id WHERE c.workspace_id=workspace_connections.workspace_id AND t.connection_id=workspace_connections.connection_id AND t.access='disabled')");
+      this.db.exec('DROP TABLE targets');
+      this.db.pragma('user_version = 2');
     })();
     this.recover();
   }
@@ -65,17 +70,23 @@ export class Store {
     this.db.prepare('INSERT INTO connections(id,json) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(profile.id, JSON.stringify(profile)); this.changed();
   }
   deleteConnection(id: string) { this.connection(id); this.db.prepare('DELETE FROM connections WHERE id=?').run(id); this.changed(); }
-  workspaceConnectionIds(workspaceId: string): string[] { this.workspace(workspaceId); return (this.db.prepare('SELECT connection_id FROM workspace_connections WHERE workspace_id=? ORDER BY rowid').all(workspaceId) as { connection_id: string }[]).map(row => row.connection_id); }
+  workspaceConnections(workspaceId: string): WorkspaceConnectionAccess[] { this.workspace(workspaceId); return this.db.prepare('SELECT connection_id as connectionId, access FROM workspace_connections WHERE workspace_id=? ORDER BY rowid').all(workspaceId) as WorkspaceConnectionAccess[]; }
   hasWorkspaceConnection(workspaceId: string, connectionId: string): boolean { return Boolean(this.db.prepare('SELECT 1 FROM workspace_connections WHERE workspace_id=? AND connection_id=?').get(workspaceId, connectionId)); }
   setWorkspaceConnection(workspaceId: string, connectionId: string, included: boolean) {
     this.workspace(workspaceId); this.connection(connectionId);
     this.db.transaction(() => {
-      if (included) this.db.prepare('INSERT OR IGNORE INTO workspace_connections VALUES (?,?)').run(workspaceId, connectionId);
+      if (included) this.db.prepare('INSERT OR IGNORE INTO workspace_connections(workspace_id,connection_id) VALUES (?,?)').run(workspaceId, connectionId);
       else {
         this.db.prepare('DELETE FROM workspace_connections WHERE workspace_id=? AND connection_id=?').run(workspaceId, connectionId);
-        this.db.prepare('DELETE FROM targets WHERE connection_id=? AND conversation_id IN (SELECT id FROM conversations WHERE workspace_id=?)').run(connectionId, workspaceId);
       }
     })(); this.changed();
+  }
+  workspaceAccess(workspaceId: string, connectionId: string): AccessMode | null {
+    return (this.db.prepare('SELECT access FROM workspace_connections WHERE workspace_id=? AND connection_id=?').get(workspaceId, connectionId) as { access: AccessMode } | undefined)?.access ?? null;
+  }
+  setWorkspaceAccess(workspaceId: string, connectionId: string, access: AccessMode) {
+    if (!this.hasWorkspaceConnection(workspaceId, connectionId)) throw new Error('Connection is not in this workspace.');
+    this.db.prepare('UPDATE workspace_connections SET access=? WHERE workspace_id=? AND connection_id=?').run(access, workspaceId, connectionId); this.changed();
   }
   conversations(workspaceId: string): Conversation[] { this.workspace(workspaceId); return this.db.prepare('SELECT json FROM conversations WHERE workspace_id=? ORDER BY rowid').all(workspaceId).map(decode<Conversation>); }
   conversation(id: string): Conversation { const row = this.db.prepare('SELECT json FROM conversations WHERE id=?').get(id); if (!row) throw new Error('Conversation not found.'); return decode<Conversation>(row); }
@@ -89,15 +100,6 @@ export class Store {
     this.db.prepare('UPDATE conversations SET json=? WHERE id=?').run(JSON.stringify(value), id); this.changed();
   }
   titleConversation(id: string, text: string) { const value = this.conversation(id); if (value.titleSource === 'default') this.renameConversation(id, text.trim().slice(0, 65) || 'New conversation', 'default'); }
-  targets(conversationId: string): ConversationTarget[] { this.conversation(conversationId); return this.db.prepare('SELECT conversation_id as conversationId,connection_id as connectionId,access FROM targets WHERE conversation_id=? ORDER BY rowid').all(conversationId) as ConversationTarget[]; }
-  target(conversationId: string, connectionId: string): ConversationTarget | null { return this.targets(conversationId).find(t => t.connectionId === connectionId) ?? null; }
-  setTarget(conversationId: string, connectionId: string, access: AccessMode | null) {
-    const conversation = this.conversation(conversationId);
-    if (access !== null && !this.hasWorkspaceConnection(conversation.workspaceId, connectionId)) throw new Error('Connection is not in this workspace.');
-    if (access === null) this.db.prepare('DELETE FROM targets WHERE conversation_id=? AND connection_id=?').run(conversationId, connectionId);
-    else this.db.prepare('INSERT INTO targets VALUES (?,?,?) ON CONFLICT(conversation_id,connection_id) DO UPDATE SET access=excluded.access').run(conversationId, connectionId, access);
-    this.changed();
-  }
   messages(workspaceId: string): Message[] { this.workspace(workspaceId); return this.db.prepare('SELECT json FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE workspace_id=?) ORDER BY rowid').all(workspaceId).map(decode<Message>); }
   conversationMessages(conversationId: string): Message[] { this.conversation(conversationId); return this.db.prepare('SELECT json FROM messages WHERE conversation_id=? ORDER BY rowid').all(conversationId).map(decode<Message>); }
   addMessage(conversationId: string, role: Message['role'], text: string, status: Message['status'] = 'completed', targetId?: string, toolName?: string): Message {

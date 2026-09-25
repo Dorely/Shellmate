@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store';
 import { secretName, type SecureStore } from './providers/secrets';
 import type { ChatModelEntry } from '../shared/types';
-import { CHAT_MODELS, DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/chat-models';
+import { CHAT_MODELS, CODEX_EFFORTS, DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/chat-models';
 import {
   effortsKey,
   isProviderKind,
@@ -19,6 +19,8 @@ import { runCapabilityProbe, type CapabilityOutcome } from './providers/generic/
 import { AnthropicClient } from './providers/generic/anthropic';
 import { ChatCompletionsClient } from './providers/generic/chat';
 import { GenericResponsesClient } from './providers/generic/responses';
+import { CodexClient, accountId } from './providers/codex';
+import type { CodexAuth } from './providers/auth';
 
 export interface ResolvedChatTarget {
   selectionId: string;
@@ -44,6 +46,8 @@ const TEST_TTL_MS = 10 * 60 * 1000;
 
 export class ChatRegistry {
   private pending = new Map<string, PendingTest>();
+  private pendingCodex = new Map<string, { account: string; generation: number; at: number }>();
+  private codex = new CodexClient();
   constructor(private readonly store: Store, private readonly secrets: SecureStore, private readonly now: () => number = Date.now) {}
 
   providers(): ChatProvider[] {
@@ -52,6 +56,43 @@ export class ChatRegistry {
 
   models(): ChatModelRecord[] {
     return parseModels(this.store.setting('chat-models', '[]'));
+  }
+  codexModels(): string[] {
+    const value: unknown = JSON.parse(this.store.setting('codex-models', '[]'));
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  }
+  async testCodexModel(raw: string, auth: CodexAuth): Promise<void> {
+    const slug = normalizeSlug(raw);
+    if (slug === 'gpt-5.6-astra') throw new Error('Use gpt-6-astra; the old ID is an alias.');
+    const token = await auth.getAccessToken();
+    const generation = auth.credentialGeneration;
+    const result = await this.codex.streamChat({ token, model: slug, effort: DEFAULT_EFFORT,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'Reply with OK.' }] }],
+      instructions: 'This is a model availability check. Reply with OK.', signal: AbortSignal.timeout(30_000) });
+    if (!result.output.some(item => item?.type === 'message' && item.content?.some((part: { text?: unknown }) => typeof part.text === 'string' && part.text.trim()))) throw new Error('Codex model test returned no text.');
+    if (generation !== auth.credentialGeneration) throw new Error('Codex sign-in changed during the test. Retry.');
+    this.pendingCodex.set(slug, { account: accountId(token), generation, at: this.now() });
+  }
+  async saveCodexModel(input: { id?: string; slug: string }, auth: CodexAuth): Promise<void> {
+    const slug = normalizeSlug(input.slug);
+    if (slug === 'gpt-5.6-astra') throw new Error('Use gpt-6-astra; the old ID is an alias.');
+    const existing = this.codexModels();
+    const old = input.id ? input.id.replace(/^codex:/, '') : undefined;
+    if (old && !existing.includes(old)) throw new Error('Custom Codex model not found.');
+    if (CHAT_MODELS.some(model => model.id === slug) || (existing.includes(slug) && slug !== old)) throw new Error('Codex model ID is already listed.');
+    const pending = this.pendingCodex.get(slug);
+    const token = await auth.getAccessToken();
+    if (!pending || this.now() - pending.at > TEST_TTL_MS || pending.generation !== auth.credentialGeneration || pending.account !== accountId(token)) throw new Error('Test this Codex model at medium effort before saving.');
+    const updated = existing.filter(item => item !== old); updated.push(slug);
+    this.store.setSetting('codex-models', JSON.stringify(updated));
+    if (old && old !== slug && this.activeSelection().modelId === `codex:${old}`) this.setActive(`codex:${slug}`, DEFAULT_EFFORT);
+  }
+  deleteCodexModel(id: string): void {
+    const slug = id.replace(/^codex:/, '');
+    const existing = this.codexModels();
+    if (!existing.includes(slug)) throw new Error('Custom Codex model not found.');
+    this.store.setSetting('codex-models', JSON.stringify(existing.filter(item => item !== slug)));
+    if (this.activeSelection().modelId === `codex:${slug}`) this.setActive(`codex:${DEFAULT_MODEL}`, DEFAULT_EFFORT);
   }
 
   private writeProviders(providers: ChatProvider[]) {
@@ -80,6 +121,11 @@ export class ChatRegistry {
       const effort = selection.effort && (builtIn.efforts as readonly string[]).includes(selection.effort) ? selection.effort : DEFAULT_EFFORT;
       return { selectionId: `codex:${builtIn.id}`, modelLabel: builtIn.label, providerLabel: 'Codex', slug: builtIn.id, effort, kind: 'codex' };
     }
+    const customCodex = this.codexModels().find(slug => `codex:${slug}` === selection.modelId);
+    if (customCodex) {
+      const effort = selection.effort && (CODEX_EFFORTS as readonly string[]).includes(selection.effort) ? selection.effort : DEFAULT_EFFORT;
+      return { selectionId: `codex:${customCodex}`, modelLabel: customCodex, providerLabel: 'Codex', slug: customCodex, effort, kind: 'codex' };
+    }
     const models = this.models();
     const record = models.find(entry => entry.id === selection.modelId);
     if (!record) throw new Error('Selected chat model is unavailable. Choose another model in Settings.');
@@ -91,6 +137,7 @@ export class ChatRegistry {
 
   options(): { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean }[] {
     const entries: { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean }[] = CHAT_MODELS.map(entry => ({ id: `codex:${entry.id}`, label: `Codex:${entry.id}`, providerLabel: 'Codex', slug: entry.id, efforts: [...entry.efforts], builtIn: true }));
+    for (const slug of this.codexModels()) entries.push({ id: `codex:${slug}`, label: `Codex:${slug}`, providerLabel: 'Codex', slug, efforts: [...CODEX_EFFORTS], builtIn: false });
     for (const model of this.models()) {
       const provider = this.providers().find(entry => entry.id === model.providerId);
       if (!provider) continue;

@@ -55,6 +55,7 @@ export class CodexAuth {
   }
 
   get status(): AuthStatus { return { ...this.statusValue }; }
+  get credentialGeneration(): number { return this.generation; }
   getStatus(): AuthStatus { return this.status; }
 
   /** Load persisted readiness for snapshots without refreshing or contacting a provider. */

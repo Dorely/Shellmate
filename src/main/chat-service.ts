@@ -11,7 +11,7 @@ import type { DiagnosticLog } from './diagnostics';
 import { redactText } from './diagnostics';
 import type { Store } from './store';
 import type { TerminalManager } from './terminal';
-import type { AccessMode, ApprovalRequest, ConversationTarget } from '../shared/types';
+import type { AccessMode, ApprovalRequest } from '../shared/types';
 import { randomUUID } from 'node:crypto';
 
 type Turn = { controller: AbortController; targets: Map<string, AccessMode> };
@@ -29,10 +29,18 @@ export class ChatService {
   constructor(private store: Store, private terminal: TerminalManager, private registry: ChatRegistry, private auth: CodexAuth, private changed: () => void, private diagnostics: DiagnosticLog) {}
   activeTurns(): string[] { return [...this.turns.keys()]; }
   approvals(): ApprovalRequest[] { return [...this.pending.values()].map(item => item.request); }
+  restrictWorkspaceAccess(workspaceId: string, connectionId: string, access: AccessMode | null): void {
+    for (const [conversationId, turn] of this.turns) {
+      if (this.store.conversation(conversationId).workspaceId !== workspaceId) continue;
+      const previous = turn.targets.get(connectionId);
+      if (access === null || access === 'disabled') turn.targets.delete(connectionId);
+      else if (access === 'ask' && previous === 'autonomous') turn.targets.set(connectionId, 'ask');
+    }
+  }
   private targetInfo(conversationId: string, frozen?: Turn) {
     const conversation = this.store.conversation(conversationId);
-    const targets = (frozen ? [...frozen.targets].map(([connectionId, access]): ConversationTarget => ({ conversationId, connectionId, access })) : this.store.targets(conversationId))
-      .filter(target => target.access !== 'disabled' && this.store.target(conversationId, target.connectionId)?.access !== 'disabled')
+    const targets = (frozen ? [...frozen.targets].map(([connectionId, access]) => ({ connectionId, access })) : this.store.workspaceConnections(conversation.workspaceId))
+      .filter(target => target.access !== 'disabled' && this.store.workspaceAccess(conversation.workspaceId, target.connectionId) !== 'disabled')
       .filter(target => this.store.hasWorkspaceConnection(conversation.workspaceId, target.connectionId));
     return targets.map(target => ({ id: target.connectionId, name: this.store.connection(target.connectionId).name, access: target.access,
       connected: Boolean(this.terminal.session(conversation.workspaceId, target.connectionId)), notes: this.store.notes(target.connectionId).map(note => note.title) }));
@@ -67,7 +75,8 @@ export class ChatService {
     this.store.conversation(conversationId);
     if (this.turns.has(conversationId)) throw new Error('A response is already running.');
     const target = await this.registry.resolveActive();
-    const turn: Turn = { controller: new AbortController(), targets: new Map(this.store.targets(conversationId).map(item => [item.connectionId, item.access])) };
+    const workspaceId = this.store.conversation(conversationId).workspaceId;
+    const turn: Turn = { controller: new AbortController(), targets: new Map(this.store.workspaceConnections(workspaceId).map(item => [item.connectionId, item.access])) };
     this.turns.set(conversationId, turn);
     this.store.titleConversation(conversationId, text); this.store.addMessage(conversationId, 'user', text.trim()); this.store.setTurn(conversationId, 'running');
     const task = this.runTurn(conversationId, text.trim(), target, turn).finally(() => {
@@ -132,8 +141,8 @@ export class ChatService {
   }
   private permitted(conversationId: string, connectionId: string, turn: Turn): AccessMode {
     const frozen = turn.targets.get(connectionId);
-    const current = this.store.target(conversationId, connectionId)?.access;
     const workspaceId = this.store.conversation(conversationId).workspaceId;
+    const current = this.store.workspaceAccess(workspaceId, connectionId);
     if (!frozen || frozen === 'disabled' || !current || current === 'disabled' || !this.store.hasWorkspaceConnection(workspaceId, connectionId)) throw new Error('Connection is not available to this conversation.');
     return frozen === 'ask' || current === 'ask' ? 'ask' : 'autonomous';
   }

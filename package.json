@@ -6,6 +6,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "browser": "npm run build && electron . --browser",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "package": "npm run build && electron-builder --win nsis --x64 --publish never",

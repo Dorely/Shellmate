@@ -1,4 +1,5 @@
 export type AccessMode = 'disabled' | 'ask' | 'autonomous';
+export type ThemeName = 'graphite' | 'light' | 'forest';
 export type ConnectionKind = 'ssh' | 'local';
 export type ShellKind = 'auto' | 'posix' | 'powershell' | 'cmd';
 export interface Workspace { id: string; name: string; createdAt: string }
@@ -15,7 +16,7 @@ export interface ConnectionInput extends Omit<ConnectionProfile, 'id' | 'created
 export interface ConnectionSummary extends ConnectionProfile { hasPassword: boolean; hasPassphrase: boolean }
 export interface Note { id: string; connectionId: string; title: string; content: string; updatedAt: string }
 export interface Conversation { id: string; workspaceId: string; title: string; titleSource: 'default' | 'user' | 'assistant'; createdAt: string }
-export interface ConversationTarget { conversationId: string; connectionId: string; access: AccessMode }
+export interface WorkspaceConnectionAccess { connectionId: string; access: AccessMode }
 export interface Message { id: string; conversationId: string; role: 'user' | 'assistant' | 'tool'; text: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; createdAt: string; targetId?: string; toolName?: string }
 export interface TerminalOwnership { conversationId: string; phase: 'working' | 'command-running' | 'returning-control'; command?: string }
 export interface TerminalSnapshot { id: string; workspaceId: string; connectionId: string; connected: boolean; output: string; seq: number; shell: ShellKind; owner: TerminalOwnership | null; activeCommand: string | null; error: string | null }
@@ -31,11 +32,11 @@ export interface ChatModelOption { id: string; label: string; providerLabel: str
 export interface ModelCapabilityResult { perEffort: Record<string, 'pass' | 'fail'>; failedEfforts: string[]; maxTokens: number | null; vision: CapabilityFlag; audio: CapabilityFlag; error?: string }
 export interface ProviderStatus { codexReady: boolean; loginPending: boolean; secureStorageAvailable: boolean; error: string | null; chatModels: ChatModelOption[]; activeChat: ActiveChatSelection; providers: ChatProviderEntry[] }
 export interface ChatContext { model: string; tokens: number; limit: number | null; includesHiddenReasoning: boolean; includesEstimatedMedia: boolean }
-export interface Snapshot { workspaces: Workspace[]; activeWorkspaceId: string; workspaceConnectionIds: string[]; connections: ConnectionSummary[]; conversations: Conversation[]; targets: ConversationTarget[]; messages: Message[]; terminals: TerminalSnapshot[]; approvals: ApprovalRequest[]; hostKeys: HostKeyRequest[]; elevations: ElevationRequest[]; providers: ProviderStatus; activeTurns: string[] }
+export interface Snapshot { theme: ThemeName; workspaces: Workspace[]; activeWorkspaceId: string; workspaceConnections: WorkspaceConnectionAccess[]; connections: ConnectionSummary[]; conversations: Conversation[]; messages: Message[]; terminals: TerminalSnapshot[]; approvals: ApprovalRequest[]; hostKeys: HostKeyRequest[]; elevations: ElevationRequest[]; providers: ProviderStatus; activeTurns: string[] }
 export interface ShellmateApi {
-  snapshot(): Promise<Snapshot>; chatContext(conversationId: string, draft: string): Promise<ChatContext>;
+  snapshot(): Promise<Snapshot>; chatContext(conversationId: string, draft: string): Promise<ChatContext>; setTheme(theme: ThemeName): Promise<void>;
   createWorkspace(name: string): Promise<Workspace>; renameWorkspace(id: string, name: string): Promise<void>; setActiveWorkspace(id: string): Promise<void>;
-  createConversation(): Promise<string>; renameConversation(id: string, title: string): Promise<void>; setTarget(conversationId: string, connectionId: string, access: AccessMode | null): Promise<void>;
+  createConversation(): Promise<string>; renameConversation(id: string, title: string): Promise<void>; setWorkspaceAccess(connectionId: string, access: AccessMode): Promise<void>;
   sendMessage(id: string, text: string): Promise<void>; cancelTurn(id: string): Promise<void>;
   saveConnection(input: ConnectionInput): Promise<ConnectionProfile>; deleteConnection(id: string): Promise<void>; setWorkspaceConnection(connectionId: string, included: boolean): Promise<void>;
   connect(connectionId: string): Promise<void>; disconnect(connectionId: string): Promise<void>; resize(connectionId: string, cols: number, rows: number): Promise<void>; write(connectionId: string, text: string): Promise<void>;
@@ -45,6 +46,7 @@ export interface ShellmateApi {
   saveChatProvider(input: { id?: string; label: string; baseUrl: string; kind: GenericProviderKind; apiKey?: string; keyAction?: 'keep' | 'replace' | 'remove' }): Promise<ChatProviderEntry>;
   deleteChatProvider(id: string): Promise<void>; listChatModels(providerId: string): Promise<string[]>; testChatModel(input: { providerId: string; slug: string; efforts: string[] }): Promise<ModelCapabilityResult>;
   saveChatModel(input: { id?: string; providerId: string; slug: string; efforts: string[] }): Promise<ChatModelEntry>; deleteChatModel(id: string): Promise<void>; setActiveChat(input: ActiveChatSelection): Promise<void>;
+  testCodexModel(slug: string): Promise<void>; saveCodexModel(input: { id?: string; slug: string }): Promise<void>; deleteCodexModel(id: string): Promise<void>;
   onChanged(callback: () => void): () => void; onTerminal(callback: (event: { id: string; seq: number; data: string }) => void): () => void;
 }
 declare global { interface Window { shellmate: ShellmateApi } }

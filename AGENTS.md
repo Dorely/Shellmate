@@ -26,8 +26,8 @@
 - Codex account chat plus OpenAI-compatible Chat Completions/Responses and Anthropic providers.
 
 ## Architectural Overview
-- Shellmate is a local Electron desktop app. The main process owns privileged operations; a sandboxed React renderer uses a fixed validated preload API.
-- The assistant may operate only explicitly selected connections, and the main process enforces command permissions and terminal ownership.
+- Shellmate is a local Electron desktop app with a loopback browser mode for development. The main process owns privileged operations; a sandboxed React renderer uses a fixed validated preload API, while browser mode uses an origin-checked local bridge.
+- The assistant may operate only connections available in its workspace under their access settings, and the main process enforces command permissions and terminal ownership.
 
 ## Code Style
 - Keep UI interaction state separate from persistence, provider resolution, terminal sessions, and chat behavior.
@@ -40,13 +40,14 @@ npm ci
 npm run typecheck
 npm run build
 npm run dev
+npm run browser
 npm run package
 ```
 
 ## Verification
 - Do not add test projects or automated tests unless the user explicitly requests them.
 - Verify normal changes with `npm run typecheck` and `npm run build`.
-- For UI/terminal work, inspect the live Electron app and record which interactions were actually checked.
+- For UI/terminal work, inspect the live Electron app or browser mode and record which interactions were actually checked.
 - For packaging changes, run `npm run package` on Windows. Never leave an app instance started for verification running.
 
 ## Conventions

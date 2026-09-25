@@ -1,5 +1,5 @@
 export const tools = [
-  { type: 'function', name: 'connect_terminal', description: 'Connect an explicitly selected connection. User handles host-key trust and credentials.', parameters: { type: 'object', properties: { connectionId: { type: 'string' } }, required: ['connectionId'], additionalProperties: false } },
+  { type: 'function', name: 'connect_terminal', description: 'Connect a permitted workspace connection. User handles host-key trust and credentials.', parameters: { type: 'object', properties: { connectionId: { type: 'string' } }, required: ['connectionId'], additionalProperties: false } },
   { type: 'function', name: 'read_terminal_state', description: 'Read the selected connection terminal status, recent output, and running command.', parameters: { type: 'object', properties: { connectionId: { type: 'string' } }, required: ['connectionId'], additionalProperties: false } },
   { type: 'function', name: 'run_shell_command', description: 'Execute in the selected shared terminal. A timeout only limits observation; the command can continue running.', parameters: { type: 'object', properties: { connectionId: { type: 'string' }, command: { type: 'string' }, timeoutSeconds: { type: 'integer', minimum: 1, maximum: 120 } }, required: ['connectionId', 'command'], additionalProperties: false } },
   { type: 'function', name: 'wait_for_terminal', description: 'Wait briefly, then read the selected terminal state. Use after a command reports running.', parameters: { type: 'object', properties: { connectionId: { type: 'string' }, seconds: { type: 'integer', minimum: 1, maximum: 30 } }, required: ['connectionId', 'seconds'], additionalProperties: false } },
@@ -13,7 +13,7 @@ export const tools = [
 export function instructions(args: { workspace: string; conversation: string; targets: { id: string; name: string; access: string; connected: boolean; notes: string[] }[] }) {
   return `You are Shellmate's assistant in a local remote-connection workspace.
 Current workspace: ${JSON.stringify(args.workspace)}. Conversation: ${JSON.stringify(args.conversation)}.
-Only these explicitly selected connections are available: ${JSON.stringify(args.targets)}.
+These workspace connections are available automatically, subject to their access settings: ${JSON.stringify(args.targets)}.
 Every terminal and note tool requires its exact connectionId. Never infer the target from the visible tab. Disabled connections are not listed.
 The user controls access. Do not try another connection when one fails, and never ask for credentials in chat. Connect only listed targets; unknown or changed SSH host keys need user trust.
 Commands run in the same visible terminal the user uses. Briefly say what you will do before each command. Show results honestly. Ask before destructive, risky, privilege-changing, or credential-changing actions unless the user's request clearly authorizes the action; the app enforces per-command approval when configured.
