@@ -112,6 +112,7 @@ export class ChatService {
   }
   cancelTurn(conversationId: string) {
     this.turns.get(conversationId)?.controller.abort();
+    this.terminal.interruptConversation(conversationId);
     for (const [id, item] of this.pending) if (item.request.conversationId === conversationId) { this.pending.delete(id); item.resolve(false); }
     this.changed();
   }
@@ -217,7 +218,7 @@ export class ChatService {
           result = { ...this.terminal.snapshot(s), output: bounded(s.output) }; break;
         }
         case 'read_terminal_state': {
-          const s = this.terminal.acquire(workspaceId, connectionId!, conversationId); result = { ...this.terminal.snapshot(s), output: bounded(s.output) }; break;
+          const s = this.terminal.acquire(workspaceId, connectionId!, conversationId); result = { ...this.terminal.snapshot(s), output: bounded(s.output), command: this.terminal.progress(s) }; break;
         }
         case 'run_shell_command': {
           const s = this.terminal.acquire(workspaceId, connectionId!, conversationId);
@@ -225,7 +226,7 @@ export class ChatService {
           if (this.permitted(conversationId, connectionId!, turn) === 'ask') await this.approve(conversationId, { kind: 'command', connectionId: connectionId!, sessionId: s.id, command }, turn);
           if (turn.controller.signal.aborted || s.owner?.conversationId !== conversationId) throw new Error('Terminal ownership changed.');
           this.store.addMessage(conversationId, 'tool', command, 'completed', connectionId, call.name);
-          result = await this.terminal.execute(s, command, typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 10, turn.controller.signal);
+          result = await this.terminal.execute(s, command, typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : 5, turn.controller.signal);
           this.store.addMessage(conversationId, 'tool', `${(result as { status: string }).status}: ${bounded(JSON.stringify(result), 2_000)}`, 'completed', connectionId, 'command_result');
           break;
         }
@@ -233,8 +234,20 @@ export class ChatService {
           const s = this.terminal.acquire(workspaceId, connectionId!, conversationId);
           const seconds = Number(args.seconds);
           if (!Number.isInteger(seconds) || seconds < 1 || seconds > 30) throw new Error('Wait must be 1–30 seconds.');
-          await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, seconds * 1000); turn.controller.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped.')); }, { once: true }); });
-          result = { ...this.terminal.snapshot(s), output: bounded(s.output) }; break;
+          // Return early when the running command finishes.
+          const running = s.command?.completed;
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, seconds * 1000);
+            void running?.finally(() => { clearTimeout(timer); resolve(); });
+            turn.controller.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped.')); }, { once: true });
+          });
+          result = { ...this.terminal.snapshot(s), output: bounded(s.output), command: this.terminal.progress(s) }; break;
+        }
+        case 'interrupt_command': {
+          const s = this.terminal.acquire(workspaceId, connectionId!, conversationId);
+          const outcome = await this.terminal.interrupt(s, conversationId, turn.controller.signal);
+          result = outcome;
+          summary = outcome.status === 'running' ? 'Ctrl+C sent; the command did not stop.' : `Interrupted${outcome.exitCode === null ? '' : ` (exit ${outcome.exitCode})`}.`; break;
         }
         case 'list_connection_notes': result = this.store.notes(connectionId!).map(note => ({ id: note.id, title: note.title, updatedAt: note.updatedAt })); break;
         case 'read_connection_note': result = this.store.notes(connectionId!).find(note => note.title.toLowerCase() === string('title').toLowerCase()) ?? { error: 'Note not found.' }; break;

@@ -41,11 +41,11 @@ For browser verification, run `npm run browser` and open the printed `http://127
 
 Every conversation sees its workspace's connection tabs, including disconnected connections it can reconnect. Each workspace connection defaults to **Ask before commands**; use **Access** to set Disabled or Autonomous. The selected terminal tab changes what the user sees; assistant tool calls always name a connection ID. New connections and permission increases take effect with the next message, while restrictions take effect immediately.
 
-The main process holds exclusive ownership of a terminal while an assistant turn uses it. The user can scroll and copy during that time. Typing and competing assistant commands are rejected. **Take over** stops further assistant dispatch and interrupts a running command. If the program ignores the interrupt, control still returns to the user after three seconds.
+The main process holds exclusive ownership of a terminal while an assistant turn uses it. The user can scroll and copy during that time. Typing and competing assistant commands are rejected. **Take over** and stopping the turn both end assistant dispatch and interrupt the assistant's running command. If the program ignores the interrupt, control still returns to the user after three seconds.
 
 Assistant commands are typed into the live shell exactly as a user would type them, so the working directory and variables persist. Shellmate learns prompt, command-start, and exit-code boundaries from invisible shell-integration sequences. Local PowerShell loads the hooks at launch. Local POSIX shells and SSH sessions receive a one-line bootstrap after connecting, with its echo hidden and, in bash, its history entry removed. Agent commands require PowerShell or a POSIX shell (bash, zsh, dash/sh) with integration ready. cmd.exe sessions are manual only. Password prompts from assistant commands open an app dialog showing the prompt text; Windows UAC elevation happens outside the terminal and is left to the user.
 
-Unknown or changed SSH host keys need explicit trust. Password prompts appear in a dedicated application dialog and are not sent to the model. Command observation timeouts do not stop remote commands. Interrupted commands are not replayed on restart.
+Unknown or changed SSH host keys need explicit trust. Password prompts appear in a dedicated application dialog and are not sent to the model. An assistant command is watched for a short window (five seconds unless the assistant asks for longer); the assistant then sees the output so far and either waits or interrupts the command itself with Ctrl+C. Interrupted commands are not replayed on restart.
 
 ## Web access
 

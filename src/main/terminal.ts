@@ -10,8 +10,9 @@ import { bootstrapLine, commandInput, IntegrationParser, powershellLaunchArgs, t
 import type { Store } from './store';
 
 type Backend = { write(data: string): void; resize(cols: number, rows: number): void; close(): void };
-type Command = { id: string; text: string; input: string; capture: string; started: boolean; interrupt: NodeJS.Timeout | null; resolve: (result: CommandResult) => void; completed: Promise<CommandResult> };
-export interface CommandResult { id: string; status: 'completed' | 'failed' | 'running' | 'interrupted'; exitCode: number | null; output: string; truncated: boolean }
+type Command = { id: string; text: string; input: string; capture: string; started: boolean; startedAt: number; interrupt: NodeJS.Timeout | null; resolve: (result: CommandResult) => void; completed: Promise<CommandResult> };
+export interface CommandResult { id: string; status: 'completed' | 'failed' | 'running' | 'interrupted'; exitCode: number | null; output: string; truncated: boolean; note?: string }
+export interface CommandProgress { id: string; command: string; running: boolean; elapsedSeconds: number; exitCode: number | null; output: string; truncated: boolean }
 type ShellState = 'starting' | 'prompt' | 'input' | 'running';
 // A typed bootstrap line whose echo stays hidden until the integrated prompt appears.
 type Bootstrap = { line: string; keepBanner: boolean; before: string; after: string; sent: boolean; quiet: NodeJS.Timeout | null; timer: NodeJS.Timeout | null };
@@ -20,10 +21,12 @@ type Session = {
   elevation: ElevationRequest | null; elevationCheck: NodeJS.Timeout | null; redact: { text: string; until: number } | null;
   integration: TerminalIntegration; integrationDetail: string | null; integrationTimer: NodeJS.Timeout | null; parser: IntegrationParser; bootstrap: Bootstrap | null;
   state: ShellState; cwd: string | null; lastExitCode: number | null; bracketedPaste: boolean;
+  lastCommand: CommandProgress | null;
 };
 type Integration = { integration: TerminalIntegration; detail: string | null; launchArgs: string[]; bootstrap: { line: string; keepBanner: boolean } | null };
 const OUTPUT_LIMIT = 160_000;
 const COMMAND_LIMIT = 32_000;
+const INTERRUPT_WAIT_MS = 5_000;
 const PASSWORD_PROMPT = /(?:^|\n)([^\n]*\b(?:password|passphrase)\b[^\n]*:)[ \t]*$/i;
 // Terminal query replies and focus reports that xterm sends without the user typing.
 const DEVICE_ATTRIBUTES = '\x1b[c';
@@ -106,7 +109,7 @@ export class TerminalManager {
     }
     session = { id: randomUUID(), workspaceId, connectionId, shell, backend, output: '', seq: 0, owner: null, command: null, turnFinished: false, error: null,
       elevation: null, elevationCheck: null, redact: null, integration: integration.integration, integrationDetail: integration.detail, integrationTimer: null,
-      parser: new IntegrationParser(nonce), bootstrap: null, state: 'starting', cwd: null, lastExitCode: null, bracketedPaste: false };
+      parser: new IntegrationParser(nonce), bootstrap: null, state: 'starting', cwd: null, lastExitCode: null, bracketedPaste: false, lastCommand: null };
     this.sessions.set(this.key(workspaceId, connectionId), session); this.changed();
     if (integration.bootstrap) this.beginBootstrap(session, integration.bootstrap.line, integration.bootstrap.keepBanner);
     else if (integration.integration === 'pending') {
@@ -195,7 +198,16 @@ export class TerminalManager {
   finishTurn(conversationId: string) { for (const s of this.sessions.values()) if (s.owner?.conversationId === conversationId) { s.turnFinished = true; if (!s.command) s.owner = null; this.changed(); } }
   takeOver(workspaceId: string, connectionId: string): string | null {
     const s = this.session(workspaceId, connectionId); if (!s?.owner) return null;
-    const conversationId = s.owner.conversationId; s.turnFinished = true;
+    const conversationId = s.owner.conversationId;
+    this.returnControl(s); return conversationId;
+  }
+  /** Interrupts commands a stopped conversation left running and returns its terminals to the user. */
+  interruptConversation(conversationId: string) {
+    for (const s of this.sessions.values()) if (s.owner?.conversationId === conversationId && s.owner.phase !== 'returning-control') this.returnControl(s);
+  }
+  private returnControl(s: Session) {
+    if (!s.owner) return;
+    s.turnFinished = true;
     const command = s.command;
     if (command) {
       s.owner.phase = 'returning-control'; this.clearElevation(s); s.backend.write('\x03');
@@ -203,10 +215,34 @@ export class TerminalManager {
       command.interrupt = setTimeout(() => {
         if (s.command !== command) return;
         s.command = null; s.owner = null;
-        command.resolve({ id: command.id, status: 'interrupted', exitCode: null, output: limit(plain(command.capture), COMMAND_LIMIT), truncated: false }); this.changed();
+        const result: CommandResult = { ...this.partial(command), status: 'interrupted', truncated: false };
+        s.lastCommand = this.progressOf(command, result); command.resolve(result); this.changed();
       }, 3_000);
     } else s.owner = null;
-    this.changed(); return conversationId;
+    this.changed();
+  }
+  /** Sends Ctrl+C to the conversation's own running command and waits briefly for its prompt. */
+  async interrupt(s: Session, conversationId: string, signal: AbortSignal): Promise<CommandResult> {
+    const command = s.command;
+    if (s.owner?.conversationId !== conversationId || !command) throw new Error('No command of yours is running in this terminal.');
+    this.clearElevation(s); s.backend.write('\x03');
+    const stopped = await Promise.race([command.completed, new Promise<null>((done, reject) => {
+      const timer = setTimeout(() => done(null), INTERRUPT_WAIT_MS);
+      void command.completed.finally(() => clearTimeout(timer));
+      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped.')); }, { once: true });
+    })]);
+    if (stopped) return { ...stopped, status: 'interrupted' };
+    return { ...this.partial(command), note: 'Ctrl+C did not return a prompt. The program may ignore interrupts or be blocked in uninterruptible I/O (for example a stale network mount). Tell the user; they can Take over or reconnect the terminal.' };
+  }
+  /** The agent's running command, or the last one it ran, as clean output. */
+  progress(s: Session): CommandProgress | null {
+    return s.command ? this.progressOf(s.command, this.partial(s.command)) : s.lastCommand;
+  }
+  private partial(command: Command): CommandResult {
+    return { id: command.id, status: 'running', exitCode: null, output: limit(plain(command.capture), COMMAND_LIMIT), truncated: command.capture.length > COMMAND_LIMIT };
+  }
+  private progressOf(command: Command, result: CommandResult): CommandProgress {
+    return { id: command.id, command: command.text, running: result.status === 'running', elapsedSeconds: Math.round((Date.now() - command.startedAt) / 1000), exitCode: result.exitCode, output: result.output, truncated: result.truncated };
   }
   private setState(s: Session, state: ShellState) {
     if (s.state === state) return;
@@ -300,7 +336,7 @@ export class TerminalManager {
     output = output.trim();
     const result: CommandResult = { id: command.id, status: exitCode === 0 ? 'completed' : 'failed', exitCode, output: limit(output, COMMAND_LIMIT), truncated: output.length > COMMAND_LIMIT };
     if (command.interrupt) clearTimeout(command.interrupt);
-    s.command = null; s.lastExitCode = exitCode; s.redact = null; this.clearElevation(s);
+    s.command = null; s.lastExitCode = exitCode; s.lastCommand = this.progressOf(command, result); s.redact = null; this.clearElevation(s);
     if (s.turnFinished || s.owner?.phase === 'returning-control') s.owner = null;
     else if (s.owner) { s.owner.phase = 'working'; s.owner.command = undefined; }
     command.resolve(result); this.changed();
@@ -349,14 +385,14 @@ export class TerminalManager {
     let resolve!: (result: CommandResult) => void;
     const completed = new Promise<CommandResult>(r => { resolve = r; });
     const input = commandInput(s.shell === 'powershell' ? 'powershell' : 'posix', commandText, s.bracketedPaste);
-    const command: Command = { id, text: commandText, input, capture: '', started: false, interrupt: null, resolve, completed };
+    const command: Command = { id, text: commandText, input, capture: '', started: false, startedAt: Date.now(), interrupt: null, resolve, completed };
     s.command = command; this.setState(s, 'running'); s.owner.phase = 'command-running'; s.owner.command = commandText; this.changed();
     s.backend.write(input);
     const timeout = Math.min(120, Math.max(1, timeoutSeconds));
     return await Promise.race([completed, new Promise<CommandResult>((done, reject) => {
-      const timer = setTimeout(() => done({ id, status: 'running', exitCode: null, output: limit(plain(command.capture), COMMAND_LIMIT), truncated: command.capture.length > COMMAND_LIMIT }), timeout * 1000);
+      const timer = setTimeout(() => done({ ...this.partial(command), note: 'Still running. Check the output, then use wait_for_terminal or interrupt_command.' }), timeout * 1000);
       void completed.finally(() => clearTimeout(timer));
-      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped while command continues.')); }, { once: true });
+      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Turn stopped; the running command was interrupted.')); }, { once: true });
     })]);
   }
 }
