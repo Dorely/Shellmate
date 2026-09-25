@@ -4,7 +4,7 @@ const call = (method: string, ...args: unknown[]) => ipcRenderer.invoke('shellma
 const api: ShellmateApi = {
   snapshot: () => call('snapshot'), chatContext: (id, draft) => call('chatContext', id, draft), setTheme: theme => call('setTheme', theme),
   createWorkspace: name => call('createWorkspace', name), renameWorkspace: (id, name) => call('renameWorkspace', id, name), setActiveWorkspace: id => call('setActiveWorkspace', id),
-  createConversation: () => call('createConversation'), renameConversation: (id, title) => call('renameConversation', id, title), setWorkspaceAccess: (connectionId, access) => call('setWorkspaceAccess', connectionId, access),
+  createConversation: () => call('createConversation'), renameConversation: (id, title) => call('renameConversation', id, title), setActiveConversation: id => call('setActiveConversation', id), deleteConversation: id => call('deleteConversation', id), setWorkspaceAccess: (connectionId, access) => call('setWorkspaceAccess', connectionId, access),
   setWorkspaceWebAccess: access => call('setWorkspaceWebAccess', access),
   sendMessage: (id, text) => call('sendMessage', id, text), cancelTurn: id => call('cancelTurn', id),
   saveConnection: input => call('saveConnection', input), deleteConnection: id => call('deleteConnection', id), setWorkspaceConnection: (id, included) => call('setWorkspaceConnection', id, included),

@@ -35,7 +35,7 @@ const connectionSchema = z.object({
 const schemas: Record<string, z.ZodTypeAny> = {
   snapshot: z.tuple([]), chatContext: z.tuple([id,string]), setTheme: z.tuple([z.enum(['graphite','light','forest'])]),
   createWorkspace: z.tuple([string]), renameWorkspace: z.tuple([id,string]), setActiveWorkspace: z.tuple([id]),
-  createConversation: z.tuple([]), renameConversation: z.tuple([id,string]), setWorkspaceAccess: z.tuple([id,z.enum(['disabled','ask','autonomous'])]), setWorkspaceWebAccess: z.tuple([z.enum(['disabled','ask','autonomous'])]),
+  createConversation: z.tuple([]), renameConversation: z.tuple([id,string.max(200)]), setActiveConversation: z.tuple([id]), deleteConversation: z.tuple([id]), setWorkspaceAccess: z.tuple([id,z.enum(['disabled','ask','autonomous'])]), setWorkspaceWebAccess: z.tuple([z.enum(['disabled','ask','autonomous'])]),
   sendMessage: z.tuple([id,string]), cancelTurn: z.tuple([id]), saveConnection: z.tuple([connectionSchema]), deleteConnection: z.tuple([id]), setWorkspaceConnection: z.tuple([id,z.boolean()]),
   connect: z.tuple([id]), disconnect: z.tuple([id]), resize: z.tuple([id,z.number().int(),z.number().int()]), write: z.tuple([id,string]), takeOver: z.tuple([id]),
   resolveApproval: z.tuple([id,z.boolean()]), trustHostKey: z.tuple([id,z.boolean()]), respondElevation: z.tuple([id,string.nullable()]),
@@ -67,6 +67,7 @@ else {
     const chat = new ChatService(store, terminal, registry, auth, webSearch, changed, diagnostics);
     if (!store.conversations(store.activeWorkspaceId()).length) store.createConversation(store.activeWorkspaceId());
     const activeWorkspace = () => store.activeWorkspaceId();
+    const workspaceConversation = (conversationId: string) => { const item = store.conversation(conversationId); if (item.workspaceId !== activeWorkspace()) throw new Error('Conversation is not in this workspace.'); return item; };
     const snapshot = async (): Promise<Snapshot> => {
       const workspaceId = activeWorkspace();
       const connections = await Promise.all(store.connections().map(async profile => ({ ...profile,
@@ -74,7 +75,7 @@ else {
         hasPassphrase: await secrets.get(secretName('ssh-passphrase', profile.id)).then(Boolean).catch(() => false) })));
       const savedTheme = store.setting('ui-theme', 'graphite');
       const theme: Snapshot['theme'] = savedTheme === 'light' || savedTheme === 'forest' ? savedTheme : 'graphite';
-      return { theme, workspaces: store.workspaces(), activeWorkspaceId: workspaceId, workspaceConnections: store.workspaceConnections(workspaceId), connections,
+      return { theme, workspaces: store.workspaces(), activeWorkspaceId: workspaceId, activeConversationId: store.activeConversationId(workspaceId) ?? '', workspaceConnections: store.workspaceConnections(workspaceId), connections,
         conversations: store.conversations(workspaceId), messages: store.messages(workspaceId),
         terminals: terminal.snapshots(workspaceId), approvals: chat.approvals().filter(item => item.workspaceId === workspaceId), hostKeys: terminal.pendingHostKeys(), elevations: terminal.pendingElevations(),
         providers: { codexReady: auth.status.ready, loginPending: auth.status.pending, secureStorageAvailable: await secrets.available(), error: auth.status.error ?? authError,
@@ -107,7 +108,14 @@ else {
       createWorkspace: name => { const item = store.createWorkspace(name); store.setActiveWorkspace(item.id); store.createConversation(item.id); return item; },
       renameWorkspace: (workspaceId, name) => store.renameWorkspace(workspaceId, name),
       setActiveWorkspace: workspaceId => { store.setActiveWorkspace(workspaceId); if (!store.conversations(workspaceId).length) store.createConversation(workspaceId); },
-      createConversation: () => store.createConversation(activeWorkspace()).id, renameConversation: (conversationId, title) => store.renameConversation(conversationId, title),
+      createConversation: () => store.createConversation(activeWorkspace()).id,
+      renameConversation: (conversationId, title: string) => { workspaceConversation(conversationId); if (title.trim()) store.renameConversation(conversationId, title); else store.releaseConversationTitle(conversationId); },
+      setActiveConversation: conversationId => { workspaceConversation(conversationId); store.setActiveConversation(conversationId); },
+      deleteConversation: conversationId => {
+        const { workspaceId } = workspaceConversation(conversationId);
+        if (chat.activeTurns().includes(conversationId)) throw new Error('Stop the response before deleting this conversation.');
+        store.deleteConversation(conversationId); if (!store.conversations(workspaceId).length) store.createConversation(workspaceId);
+      },
       setWorkspaceAccess: (connectionId, access) => { const workspaceId = activeWorkspace(); if (!store.hasWorkspaceConnection(workspaceId, connectionId)) throw new Error('Connection is not in this workspace.'); chat.restrictWorkspaceAccess(workspaceId, connectionId, access); store.setWorkspaceAccess(workspaceId, connectionId, access); },
       setWorkspaceWebAccess: access => { const workspaceId = activeWorkspace(); chat.restrictWorkspaceWebAccess(workspaceId, access); store.setWorkspaceWebAccess(workspaceId, access); },
       sendMessage: (conversationId, text) => chat.sendMessage(conversationId, text), cancelTurn: conversationId => chat.cancelTurn(conversationId),

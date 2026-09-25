@@ -37,11 +37,13 @@ export type SearchBackendId = 'serpapi' | 'tavily';
 export interface WebSearchStatus { backend: SearchBackendId | null; keys: Record<SearchBackendId, boolean> }
 export interface ProviderStatus { codexReady: boolean; loginPending: boolean; secureStorageAvailable: boolean; error: string | null; chatModels: ChatModelOption[]; activeChat: ActiveChatSelection; providers: ChatProviderEntry[] }
 export interface ChatContext { model: string; tokens: number; limit: number | null; includesHiddenReasoning: boolean; includesEstimatedMedia: boolean }
-export interface Snapshot { theme: ThemeName; workspaces: Workspace[]; activeWorkspaceId: string; workspaceConnections: WorkspaceConnectionAccess[]; connections: ConnectionSummary[]; conversations: Conversation[]; messages: Message[]; terminals: TerminalSnapshot[]; approvals: ApprovalRequest[]; hostKeys: HostKeyRequest[]; elevations: ElevationRequest[]; providers: ProviderStatus; webSearch: WebSearchStatus; activeTurns: string[] }
+export interface Snapshot { theme: ThemeName; workspaces: Workspace[]; activeWorkspaceId: string; activeConversationId: string; workspaceConnections: WorkspaceConnectionAccess[]; connections: ConnectionSummary[]; conversations: Conversation[]; messages: Message[]; terminals: TerminalSnapshot[]; approvals: ApprovalRequest[]; hostKeys: HostKeyRequest[]; elevations: ElevationRequest[]; providers: ProviderStatus; webSearch: WebSearchStatus; activeTurns: string[] }
 export interface ShellmateApi {
   snapshot(): Promise<Snapshot>; chatContext(conversationId: string, draft: string): Promise<ChatContext>; setTheme(theme: ThemeName): Promise<void>;
   createWorkspace(name: string): Promise<Workspace>; renameWorkspace(id: string, name: string): Promise<void>; setActiveWorkspace(id: string): Promise<void>;
-  createConversation(): Promise<string>; renameConversation(id: string, title: string): Promise<void>; setWorkspaceAccess(connectionId: string, access: AccessMode): Promise<void>; setWorkspaceWebAccess(access: AccessMode): Promise<void>;
+  /** A blank title returns naming to the assistant. */
+  createConversation(): Promise<string>; renameConversation(id: string, title: string): Promise<void>; setActiveConversation(id: string): Promise<void>; deleteConversation(id: string): Promise<void>;
+  setWorkspaceAccess(connectionId: string, access: AccessMode): Promise<void>; setWorkspaceWebAccess(access: AccessMode): Promise<void>;
   sendMessage(id: string, text: string): Promise<void>; cancelTurn(id: string): Promise<void>;
   saveConnection(input: ConnectionInput): Promise<ConnectionProfile>; deleteConnection(id: string): Promise<void>; setWorkspaceConnection(connectionId: string, included: boolean): Promise<void>;
   connect(connectionId: string): Promise<void>; disconnect(connectionId: string): Promise<void>; resize(connectionId: string, cols: number, rows: number): Promise<void>; write(connectionId: string, text: string): Promise<void>;

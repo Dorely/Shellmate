@@ -12,7 +12,7 @@ const baseTools = [
   { type: 'function', name: 'read_connection_note', description: 'Read one connection note by its title.', parameters: { type: 'object', properties: { connectionId: { type: 'string' }, title: { type: 'string' } }, required: ['connectionId', 'title'], additionalProperties: false } },
   { type: 'function', name: 'save_connection_note', description: 'Create or update a visible connection note by title. Keep secrets out unless the user explicitly requests them.', parameters: { type: 'object', properties: { connectionId: { type: 'string' }, title: { type: 'string' }, content: { type: 'string' } }, required: ['connectionId', 'title', 'content'], additionalProperties: false } },
   { type: 'function', name: 'delete_connection_note', description: 'Delete a visible connection note only when the user explicitly asks.', parameters: { type: 'object', properties: { connectionId: { type: 'string' }, title: { type: 'string' } }, required: ['connectionId', 'title'], additionalProperties: false } },
-  { type: 'function', name: 'rename_session', description: 'Name the current conversation when its goal is clear; respect a title chosen by the user.', parameters: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } },
+  { type: 'function', name: 'rename_session', description: 'Set the title shown in conversation history: a short, high-level label for the overall work in this conversation. Has no effect when the user named the conversation.', parameters: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } },
   { type: 'function', name: 'recall_tool_output', description: 'Reread the full output of an earlier tool call in this conversation whose result was cleared to save context, up to 20000 characters per call. Pass the returned nextStartChar to continue.', parameters: { type: 'object', properties: { callId: { type: 'string' }, startChar: { type: 'integer', minimum: 0 } }, required: ['callId'], additionalProperties: false } }
 ] as const;
 
@@ -35,9 +35,14 @@ Never put secrets, credentials, tokens, internal hostnames, private IPs, usernam
 When you use web information, cite sources with their full URLs.`;
 }
 
-export function instructions(args: { workspace: string; conversation: string; targets: { id: string; name: string; access: string; connected: boolean; notes: string[] }[]; web: AccessMode; search: SearchSource }) {
+function titleInstructions(conversation: { title: string; titleSource: string }) {
+  if (conversation.titleSource === 'user') return `The user named this conversation ${JSON.stringify(conversation.title)}; keep that title and do not call rename_session.`;
+  return `The conversation title is ${JSON.stringify(conversation.title)}${conversation.titleSource === 'default' ? ', a placeholder taken from the first message' : ''}. You own it: call rename_session with a 3–7 word label for the overall work, like a ticket title ("Diagnose nginx 502s on web-01", "Plan Postgres 16 upgrade"), not a restatement of the user's words, with no trailing punctuation. Set it once the goal is clear, usually in your first response, and change it only when the focus of the work shifts substantially.`;
+}
+
+export function instructions(args: { workspace: string; conversation: { title: string; titleSource: string }; targets: { id: string; name: string; access: string; connected: boolean; notes: string[] }[]; web: AccessMode; search: SearchSource }) {
   return `You are Shellmate's assistant in a local remote-connection workspace.
-Current workspace: ${JSON.stringify(args.workspace)}. Conversation: ${JSON.stringify(args.conversation)}.
+Current workspace: ${JSON.stringify(args.workspace)}.
 These workspace connections are available automatically, subject to their access settings: ${JSON.stringify(args.targets)}.
 Every terminal and note tool requires its exact connectionId. Never infer the target from the visible tab. Disabled connections are not listed.
 The user controls access. Do not try another connection when one fails, and never ask for credentials in chat. Connect only listed targets; unknown or changed SSH host keys need user trust.
@@ -47,5 +52,6 @@ Your commands run in the shared interactive login shell, so shell-level state pe
 Connection notes are user-visible. Read relevant notes before system changes. Update focused notes after durable discoveries or material changes. Do not store secrets unless the user explicitly asks for that exact information.
 Long conversations are compacted automatically: older tool outputs may be cleared (reread them with recall_tool_output when needed) and earlier history may be replaced by a summary. Trust the summary, and check live state with the terminal tools rather than guessing.
 The user may take over a terminal at any time. Keep responses concise and distinguish observations, suggestions, and executed changes.
+${titleInstructions(args.conversation)}
 ${webInstructions(args.web, args.search)}`;
 }

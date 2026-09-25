@@ -2,7 +2,7 @@ import type { ShellmateApi } from '../shared/types';
 
 const methods = [
   'snapshot', 'chatContext', 'setTheme', 'createWorkspace', 'renameWorkspace', 'setActiveWorkspace',
-  'createConversation', 'renameConversation', 'setWorkspaceAccess', 'setWorkspaceWebAccess', 'sendMessage', 'cancelTurn',
+  'createConversation', 'renameConversation', 'setActiveConversation', 'deleteConversation', 'setWorkspaceAccess', 'setWorkspaceWebAccess', 'sendMessage', 'cancelTurn',
   'saveConnection', 'deleteConnection', 'setWorkspaceConnection', 'connect', 'disconnect', 'resize', 'write', 'takeOver',
   'resolveApproval', 'trustHostKey', 'respondElevation', 'listNotes', 'saveNote', 'deleteNote',
   'startLogin', 'cancelLogin', 'logout', 'saveChatProvider', 'deleteChatProvider', 'listChatModels',

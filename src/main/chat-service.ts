@@ -72,7 +72,7 @@ export class ChatService {
   }
   private chatInstructions(conversationId: string, plan: WebPlan, frozen?: Turn) {
     const conversation = this.store.conversation(conversationId);
-    return instructions({ workspace: this.store.workspace(conversation.workspaceId).name, conversation: conversation.title, targets: this.targetInfo(conversationId, frozen), web: plan.web, search: plan.search });
+    return instructions({ workspace: this.store.workspace(conversation.workspaceId).name, conversation, targets: this.targetInfo(conversationId, frozen), web: plan.web, search: plan.search });
   }
   private history(conversationId: string): unknown[] {
     const raw = this.store.setting(`history/${conversationId}`, '[]');

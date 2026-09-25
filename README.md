@@ -6,6 +6,7 @@ Shellmate is a Windows-first desktop remote connection manager. It pairs visible
 
 - Electron main process with a sandboxed React renderer and a fixed, validated preload API.
 - SQLite workspaces, shared connection profiles, per-workspace conversations, connection notes, and durable chat/tool history.
+- Each workspace reopens its last active conversation after a restart. History lists conversations newest first; rename or delete them there or click the title. The assistant keeps titles as short, high-level labels of the work until you name a conversation yourself; clearing your title hands naming back to the assistant.
 - Local PTYs and SSH shell sessions with host-key verification, password/private-key authentication, terminal tabs, and a two-terminal split.
 - Codex account chat, generic Chat Completions, Responses, and Anthropic providers. API keys and OAuth tokens use Electron OS-backed encryption.
 - Workspace connections are available to every conversation in that workspace, with disabled, ask-before-command, or autonomous access. A terminal an assistant uses is locked for the turn; user takeover stops further assistant dispatch.

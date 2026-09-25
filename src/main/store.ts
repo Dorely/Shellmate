@@ -100,10 +100,30 @@ export class Store {
   createConversation(workspaceId: string): Conversation {
     this.workspace(workspaceId);
     const value: Conversation = { id: randomUUID(), workspaceId, title: 'New conversation', titleSource: 'default', createdAt: now() };
-    this.db.prepare('INSERT INTO conversations VALUES (?,?,?)').run(value.id, workspaceId, JSON.stringify(value)); this.changed(); return value;
+    this.db.prepare('INSERT INTO conversations VALUES (?,?,?)').run(value.id, workspaceId, JSON.stringify(value)); this.setActiveConversation(value.id); return value;
+  }
+  /** The workspace's remembered conversation, falling back to its newest one. */
+  activeConversationId(workspaceId: string): string | null {
+    const saved = this.setting(`conversation-active/${workspaceId}`);
+    const ids = this.conversations(workspaceId).map(item => item.id);
+    return ids.includes(saved) ? saved : ids.at(-1) ?? null;
+  }
+  setActiveConversation(id: string) { this.setSetting(`conversation-active/${this.conversation(id).workspaceId}`, id); }
+  deleteConversation(id: string) {
+    this.conversation(id);
+    this.db.transaction(() => { this.db.prepare('DELETE FROM conversations WHERE id=?').run(id); this.db.prepare('DELETE FROM settings WHERE key=?').run(`history/${id}`); })(); this.changed();
   }
   renameConversation(id: string, raw: string, source: Conversation['titleSource'] = 'user') {
     const value = this.conversation(id); value.title = name(raw, 70); value.titleSource = source;
+    this.db.prepare('UPDATE conversations SET json=? WHERE id=?').run(JSON.stringify(value), id); this.changed();
+  }
+  /** Drops a user title so the assistant names the conversation again. */
+  releaseConversationTitle(id: string) {
+    const value = this.conversation(id);
+    if (value.titleSource !== 'user') return;
+    const started = Boolean(this.db.prepare('SELECT 1 FROM messages WHERE conversation_id=?').get(id));
+    if (!started) value.title = 'New conversation';
+    value.titleSource = started ? 'assistant' : 'default';
     this.db.prepare('UPDATE conversations SET json=? WHERE id=?').run(JSON.stringify(value), id); this.changed();
   }
   titleConversation(id: string, text: string) { const value = this.conversation(id); if (value.titleSource === 'default') this.renameConversation(id, text.trim().slice(0, 65) || 'New conversation', 'default'); }

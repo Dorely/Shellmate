@@ -64,6 +64,15 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - The likely-cause pattern matched `set -e; …`, `set -euo pipefail`, and `&& exit 1`. It did not match `docker exec`, `find -exec`, or `bash -c "set -e; …"`.
 - Not verified: the `disconnected` result and errexit note in a live app turn, and zsh.
 
+2026-09-25 conversation management and provider layout:
+
+- `npm run typecheck` and `npm run build` passed.
+- `npm run browser` on the live profile: ＋ created a conversation and made it active; clicking the title opened an inline editor and Enter saved a user title. History listed conversations newest first with rename and delete controls; a reload kept the new conversation active. Clearing the title from History on the empty conversation returned it to `New conversation` with `default` source. Deleting it (confirm accepted) fell back to the newest remaining conversation, leaving the original eight. The original conversation was set active again.
+- A long History title first overflowed and hid the row controls; the list column was constrained and the titles now truncate.
+- At 1600×1000 the providers dialog filled most of the window with four separate cards, each splitting its saved items from its add/edit form.
+- Not verified: an assistant `rename_session` call under the new prompt, the Electron window (the workspace name dialog replaces `window.prompt`, which Electron does not support), and the single-column layout below 1000px.
+- The browser-mode app was stopped.
+
 2026-09-25 mid-turn context compaction:
 
 - `npm run typecheck` and `npm run build` passed.
