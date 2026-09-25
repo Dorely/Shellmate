@@ -7,6 +7,13 @@
 - Do not assume everything in `VISION.md` is implemented or currently part of the implementation plan. Use the codebase to confirm current behavior.
 - Keep this file (`AGENTS.md`) stable and high level. Do not add notes here that are likely to become stale during normal development.
 
+## Git Workflow
+- Before starting a task, inspect the current branch, upstream, and working tree, including untracked files. Fetch the latest remote refs and bring the branch up to date with upstream before making task changes.
+- Start new work with a clean working tree and index. If uncommitted work is clearly a completed prior task, verify and commit it first. If it is incomplete, unrelated, or its status is unclear, stop and ask the user rather than stashing, discarding, or mixing it into the new task.
+- Fast-forward when possible. Integrate upstream changes only when the merge is clear and conflict-free; stop and ask if conflicts or competing changes require a decision. Do not overwrite remote history.
+- Commit all completed task changes in focused commits after the appropriate checks, including documentation-only changes. Leave the tree clean when the task is done.
+- Fetch again before pushing. Push completed commits when the remote can accept them without conflicts. If the upstream has diverged or a push is rejected, do not force-push; resolve a straightforward conflict-free integration or stop and ask.
+
 ## File Map Maintenance
 - After adding, deleting, or renaming any source file, update `FILEMAP.md` to reflect the change.
 - When refactoring moves code between files or changes a file's responsibility, update the description in `FILEMAP.md`.
