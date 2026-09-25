@@ -1,0 +1,20 @@
+appId: com.dorely.shellmate
+productName: Shellmate
+directories:
+  output: release-ready
+electronDist: node_modules/electron/dist
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - node_modules/better-sqlite3/**/*
+  - node_modules/node-pty/**/*
+win:
+  target: nsis
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+npmRebuild: false

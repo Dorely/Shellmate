@@ -1,19 +1,4 @@
 {
   "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build Shellmate",
-      "type": "process",
-      "command": "dotnet",
-      "args": [
-        "build",
-        "${workspaceFolder}/Shellmate/Shellmate.csproj"
-      ],
-      "problemMatcher": "$msCompile",
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    }
-  ]
+  "tasks": [{ "label": "typecheck Shellmate", "type": "npm", "script": "typecheck", "problemMatcher": "$tsc", "group": "build" }]
 }
