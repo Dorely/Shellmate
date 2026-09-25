@@ -64,6 +64,12 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - The likely-cause pattern matched `set -e; …`, `set -euo pipefail`, and `&& exit 1`. It did not match `docker exec`, `find -exec`, or `bash -c "set -e; …"`.
 - Not verified: the `disconnected` result and errexit note in a live app turn, and zsh.
 
+2026-09-25 in-place delete confirmation (native confirm dialogs removed):
+
+- `npm run typecheck` and `npm run build` passed; no `alert`, `confirm`, or `prompt` calls remain in `src`.
+- `npm run browser`: a new conversation's History × turned into a red `Delete?` button in the same spot, and a second click at the same point deleted it (8 conversations remained; the original was set active again). An earlier second click that landed outside the button disarmed it without deleting.
+- Edit connection → Delete connection armed as `Delete it and its notes everywhere?` in place and disarmed when the pointer left; the dialog was cancelled and both connections remained. The browser-mode app was stopped.
+
 2026-09-25 conversation management and provider layout:
 
 - `npm run typecheck` and `npm run build` passed.

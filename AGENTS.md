@@ -33,6 +33,7 @@
 - Keep UI interaction state separate from persistence, provider resolution, terminal sessions, and chat behavior.
 - Do not expose general filesystem, shell, or credential access through preload.
 - Store credentials through the OS-encrypted `SecureStore`; do not put plaintext secrets in SQLite, snapshots, prompts, or logs.
+- Never use native dialogs (`alert`, `confirm`, `prompt`, Electron message boxes) for user interaction; build them into the app UI. Confirm destructive actions in place, at the control that triggered them. The only exception is the startup-failure error box shown before any window exists.
 
 ## Build & Run
 ```bash

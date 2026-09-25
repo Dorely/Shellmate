@@ -26,3 +26,4 @@
 .settings-form .row button.primary{border-color:var(--accent)}
 .settings-error{grid-column:1/-1;margin:0}
 @media(max-width:1000px){.settings-grid{grid-template-columns:1fr;padding:14px}}
+.danger.armed,.danger.armed:hover{background:var(--danger-bg);color:var(--danger-text);border-color:var(--danger-border);font-weight:600;white-space:nowrap}

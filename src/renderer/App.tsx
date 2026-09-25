@@ -64,6 +64,14 @@ function TerminalPane({ profile, session, theme, onConnect, onDisconnect, onTake
   </div>;
 }
 
+/** A destructive button that asks "are you sure" in place: the first click arms it, the second acts; leaving or Escape disarms it. */
+function ConfirmButton({ label, confirmLabel, ariaLabel, title, disabled, onConfirm }: { label: React.ReactNode; confirmLabel: string; ariaLabel?: string; title?: string; disabled?: boolean; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+  return <button className={`danger ${armed ? 'armed' : ''}`} title={armed ? undefined : title} aria-label={armed ? confirmLabel : ariaLabel} disabled={disabled}
+    onClick={() => { if (!armed) { setArmed(true); return; } setArmed(false); onConfirm(); }}
+    onMouseLeave={() => setArmed(false)} onBlur={() => setArmed(false)} onKeyDown={e => { if (e.key === 'Escape') setArmed(false); }}>{armed ? confirmLabel : label}</button>;
+}
+
 function ConnectionDialog({ profile, onClose, onSave, onDelete }: { profile?: ConnectionSummary; onClose: () => void; onSave: (input: ConnectionInput) => Promise<void>; onDelete?: () => Promise<void> }) {
   const [draft, setDraft] = useState<ConnectionInput>(profile ? connectionInput(profile) : emptyConnection());
   const [busy, setBusy] = useState(false);
@@ -90,7 +98,7 @@ function ConnectionDialog({ profile, onClose, onSave, onDelete }: { profile?: Co
       </>}
       <label>Shell syntax<select value={draft.shell} onChange={e => update('shell', e.target.value as ConnectionInput['shell'])}><option value="auto">Detect</option><option value="posix">POSIX</option><option value="powershell">PowerShell</option><option value="cmd">cmd</option></select></label>
     </div>{error && <p className="error" role="alert">{error}</p>}</div>
-    <div className="dialog-actions">{profile && onDelete && <button className="danger" onClick={() => { if (window.confirm(`Delete ${profile.name} and its notes from all workspaces?`)) void onDelete().then(onClose).catch(error => setError(errorText(error))); }}>Delete connection</button>}<span className="fill" /><button onClick={onClose}>Cancel</button><button className="primary" disabled={busy} onClick={() => void save()}>Save connection</button></div>
+    <div className="dialog-actions">{profile && onDelete && <ConfirmButton label="Delete connection" confirmLabel="Delete it and its notes everywhere?" onConfirm={() => void onDelete().then(onClose).catch(error => setError(errorText(error)))} />}<span className="fill" /><button onClick={onClose}>Cancel</button><button className="primary" disabled={busy} onClick={() => void save()}>Save connection</button></div>
   </div></div>;
 }
 
@@ -213,7 +221,6 @@ export default function App() {
     if (value === null || value.trim() === item.title || (!value.trim() && item.titleSource !== 'user')) return;
     void act(() => api().renameConversation(item.id, value.trim()));
   };
-  const deleteConversation = (item: Conversation) => { if (window.confirm(`Delete "${item.title}"? Its messages and tool history will be removed.`)) void act(() => api().deleteConversation(item.id)); };
   const saveConnection = async (input: ConnectionInput) => { const result = await api().saveConnection(input); await refresh(); if (!result) throw new Error('Connection could not be saved.'); };
   if (!snapshot) return <div className="loading">Loading Shellmate…</div>;
   return <div className="app-shell">
@@ -229,7 +236,7 @@ export default function App() {
         <div className="chat-heading"><div className="overline">Conversation</div><div className="row">{conversation && titleEdit?.id === conversation.id && titleEdit.place === 'heading' ? <TitleInput value={conversation.title} onDone={value => commitTitle(conversation, value)} /> : <button className="conversation-title" title={conversation ? titleHint(conversation) : undefined} onClick={() => conversation && setTitleEdit({ id: conversation.id, place: 'heading' })}>{conversation?.title ?? 'New conversation'} <span className="subtle">✎</span></button>}<span className="fill" /><button className={showHistory ? 'selected' : ''} title="Conversation history" onClick={() => setShowHistory(!showHistory)}>History</button><button title="New conversation" onClick={() => void act(() => api().createConversation())}>＋</button></div></div>
         {showHistory && <div className="history-list">{[...snapshot.conversations].reverse().map(item => titleEdit?.id === item.id && titleEdit.place === 'history' ? <TitleInput key={item.id} value={item.title} onDone={value => commitTitle(item, value)} /> : <div key={item.id} className={`history-row ${item.id === conversation?.id ? 'selected' : ''}`}>
           <button className="history-open" title={titleHint(item)} onClick={() => { selectConversation(item.id); setShowHistory(false); }}><span className="history-title">{item.title}</span>{snapshot.activeTurns.includes(item.id) && <span className="agent-mark" title="Responding">✦</span>}{snapshot.approvals.some(approval => approval.conversationId === item.id) && <span className="needs-attention">!</span>}</button>
-          <button title="Rename conversation" aria-label={`Rename ${item.title}`} onClick={() => setTitleEdit({ id: item.id, place: 'history' })}>✎</button><button className="danger" title={snapshot.activeTurns.includes(item.id) ? 'Stop the response before deleting' : 'Delete conversation'} aria-label={`Delete ${item.title}`} disabled={snapshot.activeTurns.includes(item.id)} onClick={() => deleteConversation(item)}>×</button>
+          <button title="Rename conversation" aria-label={`Rename ${item.title}`} onClick={() => setTitleEdit({ id: item.id, place: 'history' })}>✎</button><ConfirmButton label="×" confirmLabel="Delete?" title={snapshot.activeTurns.includes(item.id) ? 'Stop the response before deleting' : 'Delete conversation'} ariaLabel={`Delete ${item.title}`} disabled={snapshot.activeTurns.includes(item.id)} onConfirm={() => void act(() => api().deleteConversation(item.id))} />
         </div>)}</div>}
          <div className="target-bar"><span className="subtle">Workspace connections</span>{workspaceConnections.map(profile => { const access = targets.find(item => item.connectionId === profile.id)?.access ?? 'ask'; const connected = snapshot.terminals.some(item => item.connectionId === profile.id); return <button className={`target-chip ${access}`} key={profile.id} onClick={() => setSelectedConnection(profile.id)} title={`${profile.name}: ${connected ? 'connected' : 'disconnected'}, ${access}`}><span className={`status-dot ${connected ? 'on' : ''}`} />{profile.name} · {access}</button>; })}<button className={`target-chip web-chip ${webAccess}`} onClick={() => setShowTargets(true)} title={`Web access: ${webAccess}`}>🌐 Web · {accessLabel[webAccess]}</button><button title="Connection permissions" onClick={() => setShowTargets(!showTargets)}>Access</button></div>
          {showTargets && <div className="target-picker"><div className="overline">Workspace agent access</div><div className="settings-row"><span><strong>Web</strong><small>Built-in model search runs only in Autonomous mode.</small></span><span className="fill" /><select aria-label="Web access" value={webAccess} onChange={e => changeWebAccess(e.target.value as AccessMode)}><option value="disabled">Disabled</option><option value="ask">Ask before each search or fetch</option><option value="autonomous">Autonomous</option></select></div>{workspaceConnections.map(profile => { const access = targets.find(target => target.connectionId === profile.id)?.access ?? 'ask'; return <div className="settings-row" key={profile.id}><strong>{profile.name}</strong><span className="fill" /><select aria-label={`${profile.name} assistant access`} value={access} onChange={e => changeAccess(profile.id, e.target.value as AccessMode)}><option value="disabled">Disabled</option><option value="ask">Ask before commands</option><option value="autonomous">Autonomous</option></select></div>; })}{conversation && snapshot.activeTurns.includes(conversation.id) && <small className="subtle">New access and increases apply to the next message. Restrictions apply immediately.</small>}</div>}
