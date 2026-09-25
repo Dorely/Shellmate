@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { url as inspectorUrl } from 'node:inspector';
 import { homedir } from 'node:os';
 import * as pty from 'node-pty';
 import { Client, type ClientChannel } from 'ssh2';
@@ -93,7 +94,9 @@ export class TerminalManager {
   private openLocal(profile: ConnectionProfile, output: (data: string) => void, closed: (reason: string) => void): Backend {
     const command = profile.localShellPath.trim() || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh');
     const args = profile.localShellArgs.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(value => value.replace(/^"|"$/g, '')) ?? [];
-    const terminal = pty.spawn(command, args, { cols: 100, rows: 30, cwd: profile.localCwd.trim() || homedir(), env: { ...process.env, TERM: 'xterm-256color' } });
+    // ConPTY can block pty.spawn inside a Windows debugger, freezing Electron's main thread.
+    const debugPty = process.platform === 'win32' && (process.env.SHELLMATE_DEBUG_PTY === 'winpty' || Boolean(inspectorUrl()));
+    const terminal = pty.spawn(command, args, { cols: 100, rows: 30, cwd: profile.localCwd.trim() || homedir(), env: { ...process.env, TERM: 'xterm-256color' }, ...(debugPty ? { useConpty: false } : {}) });
     terminal.onData(output);
     terminal.onExit(() => closed('Local shell exited.'));
     return { write: data => terminal.write(data), resize: (cols, rows) => terminal.resize(cols, rows), close: () => terminal.kill() };

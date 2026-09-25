@@ -12,6 +12,8 @@ Provider transports and registry logic were adapted from the SfxChat revision re
 
 The main process keeps one live session per workspace/connection pair. Local sessions use node-pty; SSH sessions use ssh2 interactive shells and compare each host-key SHA-256 hash with the explicitly trusted profile hash. Unknown or changed keys are rejected until the user trusts the presented fingerprint. The renderer uses xterm and receives bounded output snapshots plus sequential live chunks.
 
+On Windows, local sessions use ConPTY during normal operation. VS Code F5 and other inspector-attached launches use node-pty's WinPTY backend because ConPTY can block while spawning under a debugger and freeze Electron's main thread.
+
 Tool calls include a connection ID, and the main process checks that the ID belongs to the conversation's workspace and selected targets. The target set is frozen at the start of a turn; additions and permission increases take effect next turn. Removals and disabling immediately prevent further dispatch. In ask mode, each command needs approval bound to its session ID and exact command text. Profile edits and reconnects invalidate pending approval through the session-ID check.
 
 The first terminal operation acquires a per-session owner for the assistant turn. The owner is independent of the selected UI tab. User input is rejected by the main process while owned, though output and notes remain readable. A second conversation receives a busy result. Takeover aborts the owning turn and sends an interrupt to a running command. The lease remains until the command finishes or the user disconnects. A soft command timeout reports that the process continues; it does not release ownership.

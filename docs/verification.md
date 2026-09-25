@@ -12,3 +12,5 @@
 Live Codex login, generic provider requests, SSH host-key/credential flows, agent command approvals, and renderer interactions have not yet been verified on configured systems. The first computer-use inventory did not expose the Shellmate window, so a visual interaction pass remained outstanding. The packaged startup check does not validate those workflows.
 
 2026-09-24 model selector relocation: `npm run typecheck` and `npm run build` passed. Computer Use found an existing Shellmate Electron window, but activation timed out and the state capture retry failed with `SetIsBorderRequired failed: No such interface supported (0x80004002)`. No live UI interaction was confirmed for this change.
+
+2026-09-24 F5 local-shell freeze: Windows ConPTY spawned and resized PowerShell outside the debugger, while node-pty's WinPTY backend spawned, reached a prompt, and resized with the inspector active. With `SHELLMATE_DEBUG_PTY=winpty`, a direct `TerminalManager` smoke check connected, received the prompt, resized, and received command output. `npm run typecheck` and `npm run build` passed. The full VS Code F5 window flow has not been rechecked after this change.

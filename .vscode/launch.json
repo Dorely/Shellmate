@@ -9,7 +9,7 @@
       "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/electron-vite",
       "windows": { "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/electron-vite.cmd" },
       "runtimeArgs": ["--sourcemap"],
-      "env": { "REMOTE_DEBUGGING_PORT": "9222" },
+      "env": { "REMOTE_DEBUGGING_PORT": "9222", "SHELLMATE_DEBUG_PTY": "winpty" },
       "presentation": { "order": 1 }
     },
     {
