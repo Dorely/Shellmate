@@ -14,7 +14,7 @@ Provider transports and registry logic were adapted from the SfxChat revision re
 
 The main process keeps one live session per workspace/connection pair. Local sessions use node-pty; SSH sessions use ssh2 interactive shells and compare each host-key SHA-256 hash with the explicitly trusted profile hash. Unknown or changed keys are rejected until the user trusts the presented fingerprint. The renderer uses xterm and receives bounded output snapshots plus sequential live chunks.
 
-On Windows, local sessions use ConPTY during normal operation. VS Code F5 and other inspector-attached launches use node-pty's WinPTY backend because ConPTY can block while spawning under a debugger and freeze Electron's main thread. WinPTY strips shell integration sequences, so those local sessions are manual only.
+Local PTYs run in a separate Electron utility process (`pty-host.ts`, driven by `LocalPtyHost` in `local-pty.ts`). node-pty's ConPTY spawn blocks its thread until a conout worker thread starts; a debugger that pauses new workers, such as VS Code F5, would otherwise deadlock the main process. The PTY host and the shells it starts receive the environment without VS Code's auto-attach `NODE_OPTIONS`, so F5 launches get working, integrated local terminals. If the host exits, its open terminals close with an error and the next connection starts a new host.
 
 Tool calls include a connection ID, and the main process checks the workspace membership and access setting. The available set is frozen at the start of a turn; additions and permission increases take effect next turn. Removals and disabling immediately prevent further dispatch. In ask mode, each command needs approval bound to its session ID and exact command text. Profile edits and reconnects invalidate pending approval through the session-ID check.
 
@@ -24,7 +24,7 @@ Shell integration (`shell-integration.ts`) wraps the prompt so the shell reports
 
 Assistant commands are sent as typed input, and multi-line input is grouped as one command: `{ … }` in POSIX shells (bracketed paste when the shell enables it), and `. { … }` in PowerShell. The result is the output between the command-start and exit marks, bounded for model context. Commands are refused while integration isn't ready, while the user has unsent prompt input, or while another command runs. Password detection runs only while an assistant command is running and its output has settled on a password or passphrase prompt. The dialog shows the prompt text, and an echoed reply is masked briefly.
 
-Local sessions use node-pty's bundled ConPTY (`useConptyDll`). The inbox Windows 10 ConPTY forwards OSC sequences ahead of its batched screen paint, which breaks command boundaries.
+The PTY host uses node-pty's bundled ConPTY (`useConptyDll`). The inbox Windows 10 ConPTY forwards OSC sequences ahead of its batched screen paint, which breaks command boundaries.
 
 ## Lifecycle
 

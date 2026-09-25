@@ -37,3 +37,10 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
   - An SSH-style run (banner kept, no screen clear) in WSL bash kept the login banner lines and dropped the pre-integration prompt.
 - In `npm run browser`, the user's Plex-Server SSH connection (Ubuntu, bash) was connected from the UI. The terminal showed the last-login banner and one clean prompt; integration was ready and reported the working directory. A user-typed `history | tail -3` showed no bootstrap entry, only two leftover entries from the previous `__SHELLMATE_*` wrapper, then returned to not busy with exit code 0. The session was disconnected, and the app was stopped.
 - Not verified: zsh (not installed), PowerShell over SSH, and assistant turns sent through a live model in the app. Under the VS Code F5 debugger, WinPTY sessions are expected to report integration as unavailable.
+
+2026-09-24 F5 freeze fixed with a PTY utility process (WinPTY fallback removed):
+
+- `npm run typecheck` and `npm run build` passed; the build emits `out/main/pty-host.js`.
+- The built app ran in browser mode under `--inspect-brk` with a CDP client that enabled `NodeWorker` with `waitForDebuggerOnStart`, the same worker pause VS Code js-debug applies, and set `VSCODE_INSPECTOR_OPTIONS`. Local PowerShell connected in about two seconds with integration ready. A typed `cd C:\Windows; cmd /c exit 3` reported cwd `C:\Windows` and exit code 3. Resize and disconnect worked, and no Shellmate `OpenConsole.exe` remained afterward.
+- A packaged `electron-builder --win dir` build (to a scratch directory, because `release-ready/win-unpacked/resources/app.asar` was locked) included `out/main/pty-host.js` in the asar and the unpacked ConPTY files. Driven over the renderer's DevTools protocol, it connected local PowerShell with integration ready and reported cwd and exit code 4.
+- The real VS Code F5 button was not pressed; the check above reproduces its worker-pausing debugger.

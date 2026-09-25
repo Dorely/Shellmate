@@ -1,10 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { url as inspectorUrl } from 'node:inspector';
 import { homedir } from 'node:os';
-import * as pty from 'node-pty';
 import { Client, type ClientChannel } from 'ssh2';
 import type { ConnectionProfile, ElevationRequest, HostKeyRequest, ShellKind, TerminalIntegration, TerminalOwnership, TerminalSnapshot } from '../shared/types';
+import { LocalPtyHost, undebuggedEnv } from './local-pty';
 import type { SecureStore } from './providers/secrets';
 import { secretName } from './providers/secrets';
 import { bootstrapLine, commandInput, IntegrationParser, powershellLaunchArgs, type IntegrationEvent } from './shell-integration';
@@ -41,10 +40,9 @@ function resolvedShell(profile: ConnectionProfile): ShellKind {
   if (/(?:bash|zsh|wsl|(?:^|[\\/])sh)(?:\.exe)?$/.test(executable)) return 'posix';
   return process.platform === 'win32' ? 'powershell' : 'posix';
 }
-function integrationFor(profile: ConnectionProfile, shell: ShellKind, nonce: string, winpty: boolean): Integration {
+function integrationFor(profile: ConnectionProfile, shell: ShellKind, nonce: string): Integration {
   const none = (integration: TerminalIntegration, detail: string): Integration => ({ integration, detail, launchArgs: [], bootstrap: null });
   if (shell === 'cmd') return none('unsupported', 'cmd.exe cannot report command boundaries. Use PowerShell or a POSIX shell for agent commands.');
-  if (winpty) return none('unavailable', 'The debugger PTY backend (winpty) strips shell integration sequences.');
   if (shell === 'powershell' && profile.kind === 'local') {
     const args = profile.localShellArgs.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
     if (args.some(arg => /^[-/](?:c|co|com\w*|e|ec|en\w*|f|fi|fil|file)$/i.test(arg))) return none('unavailable', 'Custom -Command or -File shell arguments prevent shell integration.');
@@ -71,6 +69,7 @@ export class TerminalManager {
   private sessions = new Map<string, Session>();
   private connecting = new Map<string, Promise<TerminalSnapshot>>();
   private hostKeys = new Map<string, HostKeyRequest>();
+  private ptys = new LocalPtyHost();
   constructor(private store: Store, private secrets: SecureStore, private changed: () => void, private onOutput: (event: { id: string; seq: number; data: string }) => void) {}
   private key(workspaceId: string, connectionId: string) { return `${workspaceId}:${connectionId}`; }
   private alive(s: Session) { return this.sessions.get(this.key(s.workspaceId, s.connectionId)) === s; }
@@ -94,16 +93,14 @@ export class TerminalManager {
   private async connectFresh(workspaceId: string, connectionId: string): Promise<TerminalSnapshot> {
     const profile = this.store.connection(connectionId);
     const shell = resolvedShell(profile);
-    // ConPTY can block pty.spawn inside a Windows debugger, freezing Electron's main thread.
-    const winpty = profile.kind === 'local' && process.platform === 'win32' && (process.env.SHELLMATE_DEBUG_PTY === 'winpty' || Boolean(inspectorUrl()));
     const nonce = randomBytes(8).toString('hex');
-    const integration = integrationFor(profile, shell, nonce, winpty);
+    const integration = integrationFor(profile, shell, nonce);
     let session: Session | null = null;
     let earlyOutput = '';
     let earlyClose: string | null = null;
     const output = (data: string) => { if (session) this.receive(session, data); else earlyOutput += data; };
     const closed = (reason: string) => { if (session) this.exited(workspaceId, connectionId, reason); else earlyClose = reason; };
-    const backend = profile.kind === 'local' ? this.openLocal(profile, integration.launchArgs, winpty, output, closed) : await this.openSsh(workspaceId, profile, output, closed);
+    const backend = profile.kind === 'local' ? await this.openLocal(profile, integration.launchArgs, output, closed) : await this.openSsh(workspaceId, profile, output, closed);
     if (earlyClose || !this.store.hasWorkspaceConnection(workspaceId, connectionId) || this.store.connection(connectionId).updatedAt !== profile.updatedAt) {
       backend.close(); throw new Error(earlyClose ?? 'Connection changed while opening. Connect again.');
     }
@@ -119,14 +116,11 @@ export class TerminalManager {
     if (earlyOutput) this.receive(session, earlyOutput);
     return this.snapshot(session);
   }
-  private openLocal(profile: ConnectionProfile, launchArgs: string[], winpty: boolean, output: (data: string) => void, closed: (reason: string) => void): Backend {
+  private openLocal(profile: ConnectionProfile, launchArgs: string[], output: (data: string) => void, closed: (reason: string) => void): Promise<Backend> {
     const command = profile.localShellPath.trim() || (process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/sh');
     const args = profile.localShellArgs.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(value => value.replace(/^"|"$/g, '')) ?? [];
     const userArgs = launchArgs.length ? args.filter(arg => !/^[-/]noe(?:x(?:it?)?)?$/i.test(arg)) : args;
-    const terminal = pty.spawn(command, [...userArgs, ...launchArgs], { cols: 100, rows: 30, cwd: profile.localCwd.trim() || homedir(), env: { ...process.env, TERM: 'xterm-256color' }, ...(winpty ? { useConpty: false } : { useConptyDll: true }) });
-    terminal.onData(output);
-    terminal.onExit(() => closed('Local shell exited.'));
-    return { write: data => terminal.write(data), resize: (cols, rows) => terminal.resize(cols, rows), close: () => terminal.kill() };
+    return this.ptys.spawn({ file: command, args: [...userArgs, ...launchArgs], cwd: profile.localCwd.trim() || homedir(), env: { ...undebuggedEnv(), TERM: 'xterm-256color' }, cols: 100, rows: 30 }, output, closed);
   }
   private async openSsh(workspaceId: string, profile: ConnectionProfile, output: (data: string) => void, closed: (reason: string) => void): Promise<Backend> {
     const client = new Client(); let offered: string | null = null;
@@ -177,7 +171,7 @@ export class TerminalManager {
     this.sessions.delete(this.key(workspaceId, connectionId)); s.backend.close(); this.release(s); this.changed();
   }
   disconnectProfile(connectionId: string) { for (const s of [...this.sessions.values()]) if (s.connectionId === connectionId) this.disconnect(s.workspaceId, connectionId, true); }
-  shutdown() { for (const s of [...this.sessions.values()]) this.disconnect(s.workspaceId, s.connectionId, true); }
+  shutdown() { for (const s of [...this.sessions.values()]) this.disconnect(s.workspaceId, s.connectionId, true); this.ptys.shutdown(); }
   resize(workspaceId: string, connectionId: string, cols: number, rows: number) {
     const s = this.session(workspaceId, connectionId); if (!s) throw new Error('Terminal is disconnected.');
     if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 2 || rows < 1 || cols > 500 || rows > 300) throw new Error('Invalid terminal dimensions.');

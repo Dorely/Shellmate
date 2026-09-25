@@ -12,7 +12,7 @@ Read this map at the start of each development session. Generated output, depend
 | `docs/sources.md` | SfxChat source revision, reused files, and attribution. |
 | `LICENSE` | MIT license copied with the SfxChat-derived source. |
 | `package.json`, `package-lock.json` | Runtime/development dependencies and build scripts. |
-| `tsconfig.json`, `electron.vite.config.ts`, `electron-builder.yml` | TypeScript, bundling, and Windows installer configuration. |
+| `tsconfig.json`, `electron.vite.config.ts`, `electron-builder.yml` | TypeScript, bundling (main plus the `pty-host` entry), and Windows installer configuration. |
 | `.vscode/launch.json`, `.vscode/tasks.json` | Electron development launch and build task. |
 | `src/shared/types.ts`, `src/shared/chat-models.ts` | Typed renderer/main contracts and built-in Codex model metadata. |
 | `src/main/index.ts` | Electron lifecycle, secure storage, provider wiring, validated operations, and app snapshots. |
@@ -20,6 +20,8 @@ Read this map at the start of each development session. Generated output, depend
 | `src/main/store.ts` | Fresh SQLite schema, workspace/connection/note/conversation persistence, tool ledger, and restart recovery. |
 | `src/main/terminal.ts` | Local PTY/SSH sessions, host-key trust, integration bootstrap, shell state, command execution, elevation prompts, and ownership. |
 | `src/main/shell-integration.ts` | PowerShell/bash/zsh/sh prompt hooks, bootstrap lines, command keystrokes, and the nonce-tagged OSC parser. |
+| `src/main/local-pty.ts` | `LocalPtyHost`: starts the PTY utility process, routes spawn/write/resize/kill messages, and strips debugger env. |
+| `src/main/pty-host.ts` | Utility-process entry that owns node-pty ConPTY terminals off the main thread. |
 | `src/main/chat-service.ts`, `src/main/assistant.ts` | Persistent streaming turns, workspace-scoped tools/approvals, prompt, cancellation, and context accounting. |
 | `src/main/chat-registry.ts`, `src/main/chat-context.ts` | Provider/model registry, selection, capability testing, and token estimates. |
 | `src/main/diagnostics.ts` | Redacted local diagnostics. |
