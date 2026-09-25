@@ -43,7 +43,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
   startLogin: z.tuple([]), cancelLogin: z.tuple([]), logout: z.tuple([]),
   saveChatProvider: z.tuple([z.object({ id: id.optional(), label: string, baseUrl: string, kind: z.enum(['chat-completions','responses','anthropic']), apiKey: string.optional(), keyAction: z.enum(['keep','replace','remove']).optional() })]),
   deleteChatProvider: z.tuple([id]), listChatModels: z.tuple([id]), testChatModel: z.tuple([z.object({ providerId: id, slug: string, efforts: z.array(string) })]),
-  saveChatModel: z.tuple([z.object({ id: id.optional(), providerId: id, slug: string, efforts: z.array(string) })]), deleteChatModel: z.tuple([id]),
+  saveChatModel: z.tuple([z.object({ id: id.optional(), providerId: id, slug: string, efforts: z.array(string), contextLimit: z.number().int().min(8_000).max(10_000_000) })]), deleteChatModel: z.tuple([id]),
   setActiveChat: z.tuple([z.object({ modelId: string, effort: string })]),
   testCodexModel: z.tuple([string]), saveCodexModel: z.tuple([z.object({ id: string.optional(), slug: string })]), deleteCodexModel: z.tuple([string]),
   saveWebSearch: z.tuple([z.object({ backend: z.enum(['serpapi','tavily']).nullable(), apiKey: string.max(512).optional(), keyAction: z.enum(['keep','replace','remove']).optional() })]), testWebSearch: z.tuple([]),

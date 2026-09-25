@@ -4,6 +4,8 @@
 // high, xhigh, max). Generic entries resolve to unknown context limits.
 export const DEFAULT_MODEL = 'gpt-5.6-sol';
 export const DEFAULT_EFFORT = 'medium';
+/** Context window assumed for custom Codex models and the default for API models. */
+export const DEFAULT_CONTEXT_LIMIT = 272_000;
 export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export const CHAT_MODELS = [
   { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', contextLimit: 272_000, efforts: [...CODEX_EFFORTS] },

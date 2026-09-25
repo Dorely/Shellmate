@@ -1,6 +1,7 @@
 import { ContextTokenCounter } from './chat-context';
 import { toolsFor, instructions, type SearchSource } from './assistant';
-import { CHAT_MODELS } from '../shared/chat-models';
+import { COMPACT_AT, KEEP_RECENT, SUMMARIZE_ABOVE, SUMMARY_INPUT, SUMMARY_MIN_HEAD, SUMMARY_INSTRUCTIONS, SUMMARY_TAIL, compactedHistory, latestUserIndex, maskObservations, outputText, reportedInputTokens, splitForSummary, summaryRequest, transcriptText } from './compaction';
+import { isContextOverflow } from './providers/errors';
 import { ChatCompletionsClient, toChatMessages, toResponsesOutput } from './providers/generic/chat';
 import { GenericResponsesClient } from './providers/generic/responses';
 import { AnthropicClient } from './providers/generic/anthropic';
@@ -19,7 +20,10 @@ import { randomUUID } from 'node:crypto';
 type Turn = { controller: AbortController; targets: Map<string, AccessMode>; web: AccessMode };
 type WebPlan = { web: AccessMode; hosted: boolean; search: SearchSource; tools: unknown[] };
 type ApprovalDetails = { kind: 'command'; connectionId: string; sessionId: string; command: string } | { kind: 'web'; action: 'search' | 'fetch'; detail: string };
-const CONNECTIONLESS_TOOLS = new Set(['rename_session', 'web_search', 'web_fetch']);
+const CONNECTIONLESS_TOOLS = new Set(['rename_session', 'web_search', 'web_fetch', 'recall_tool_output']);
+const RECALL_CHARS = 20_000;
+type Live = { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string; limit: number; calibration: number };
+const kilo = (tokens: number) => `~${Math.round(tokens / 1000)}k`;
 const ACCESS_RANK: Record<AccessMode, number> = { disabled: 0, ask: 1, autonomous: 2 };
 type PendingApproval = { request: ApprovalRequest; resolve: (allow: boolean) => void };
 const bounded = (value: string, length = 5_000) => value.length > length ? value.slice(-length) : value;
@@ -29,7 +33,7 @@ export class ChatService {
   private turns = new Map<string, Turn>();
   private turnTasks = new Set<Promise<void>>();
   private pending = new Map<string, PendingApproval>();
-  private live = new Map<string, { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string }>();
+  private live = new Map<string, Live>();
   private codex = new CodexClient();
   private shuttingDown = false;
   constructor(private store: Store, private terminal: TerminalManager, private registry: ChatRegistry, private auth: CodexAuth, private search: WebSearchService, private changed: () => void, private diagnostics: DiagnosticLog) {}
@@ -85,12 +89,14 @@ export class ChatService {
   }
   async chatContext(conversationId: string, draft: string) {
     const live = this.live.get(conversationId);
-    const selection = this.registry.activeSelection();
-    const model = live?.model ?? selection.modelId.replace(/^codex:/, '');
-    const entry = CHAT_MODELS.find(item => item.id === model);
-    if (live) return { model, limit: entry?.contextLimit ?? null, ...this.counter.count({ instructions: live.instructions, tools: live.tools, input: live.input, draft, streamingText: live.text }) };
-    const plan = await this.webPlan(conversationId, await this.registry.resolveActive().catch(() => null));
-    return { model, limit: entry?.contextLimit ?? null, ...this.counter.count({ instructions: this.chatInstructions(conversationId, plan), tools: plan.tools, input: this.history(conversationId), draft }) };
+    if (live) {
+      const count = this.counter.count({ instructions: live.instructions, tools: live.tools, input: live.input, draft, streamingText: live.text });
+      return { model: live.model, limit: live.limit, ...count, tokens: Math.round(count.tokens * live.calibration) };
+    }
+    const target = await this.registry.resolveActive().catch(() => null);
+    const plan = await this.webPlan(conversationId, target);
+    return { model: target?.slug ?? this.registry.activeSelection().modelId.replace(/^codex:/, ''), limit: target ? this.registry.contextLimit(target) : null,
+      ...this.counter.count({ instructions: this.chatInstructions(conversationId, plan), tools: plan.tools, input: this.history(conversationId), draft }) };
   }
   async sendMessage(conversationId: string, text: string) {
     if (this.shuttingDown) throw new Error('Shellmate is closing.');
@@ -140,17 +146,34 @@ export class ChatService {
       input.push({ role: 'user', content: [{ type: 'input_text', text }] });
       this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
       const prompt = this.chatInstructions(conversationId, await this.webPlan(conversationId, target, turn), turn);
-      const live: { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string } = { input, text: '', instructions: prompt, tools: [], model: target.slug }; this.live.set(conversationId, live);
+      const limit = this.registry.contextLimit(target);
+      const live: Live = { input, text: '', instructions: prompt, tools: [], model: target.slug, limit, calibration: 1 }; this.live.set(conversationId, live);
+      // Close the current bubble so an activity row sits between the text before and after it.
+      const activity = (add: () => void) => {
+        if (message.text) { message.status = 'completed'; this.store.updateMessage(message); } else this.store.deleteMessage(message.id);
+        add(); message = this.store.addMessage(conversationId, 'assistant', '', 'running');
+      };
+      // Provider-reported prompt tokens divided by our estimate; tiktoken undercounts some providers.
+      let calibration = 1;
+      const calibrate = (value: number) => { calibration = value; live.calibration = value; };
       for (; !turn.controller.signal.aborted; round++) {
         const plan = await this.webPlan(conversationId, target, turn); live.tools = plan.tools;
-        const response = await this.stream(target, { input, instructions: prompt, plan, signal: turn.controller.signal,
-          onText: chunk => { live.text += chunk; message.text += chunk; this.store.updateMessage(message); },
-          onWebSearch: activity => {
-            // Close the current bubble so the activity row sits between the text before and after the search.
-            if (message.text) { message.status = 'completed'; this.store.updateMessage(message); } else this.store.deleteMessage(message.id);
-            this.store.addMessage(conversationId, 'tool', activity.detail ? `${activity.query} — ${activity.detail}` : activity.query, 'completed', undefined, 'web_search (built-in)');
-            message = this.store.addMessage(conversationId, 'assistant', '', 'running');
-          } });
+        let response: Awaited<ReturnType<ChatService['stream']>> | undefined;
+        for (let retried = false; !response;) {
+          const estimate = await this.compact(conversationId, target, { input, prompt, plan, limit, calibration, round, signal: turn.controller.signal, activity });
+          try {
+            response = await this.stream(target, { input, instructions: prompt, plan, signal: turn.controller.signal,
+              onText: chunk => { live.text += chunk; message.text += chunk; this.store.updateMessage(message); },
+              onWebSearch: search => activity(() => this.store.addMessage(conversationId, 'tool', search.detail ? `${search.query} — ${search.detail}` : search.query, 'completed', undefined, 'web_search (built-in)')) });
+            const reported = reportedInputTokens(response.usage);
+            if (reported) calibrate(Math.min(3, Math.max(1, reported / estimate)));
+          } catch (error) {
+            if (retried || turn.controller.signal.aborted || !isContextOverflow(error)) throw error;
+            // The provider counts more than our estimate; compact as if the window were full, then retry once.
+            retried = true; live.text = ''; calibrate(Math.max(calibration, limit / estimate * 1.05));
+            this.diagnostics.record('chat.context_overflow', { conversationId, round, estimate });
+          }
+        }
         message.status = 'completed'; if (response.sources.length) message.sources = response.sources;
         this.store.updateMessage(message); input.push(...response.output); live.text = '';
         this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
@@ -171,6 +194,54 @@ export class ChatService {
       this.store.updateMessage(message); this.store.setTurn(conversationId, message.status);
       this.diagnostics.record('chat.failed', { conversationId, round, error: safe });
     } finally { this.live.delete(conversationId); }
+  }
+  /**
+   * Keeps the next request inside the model window. Clears older tool outputs first; if the context is
+   * still too full, replaces older history with a visible summary. Returns the uncalibrated estimate to send.
+   */
+  private async compact(conversationId: string, target: ResolvedChatTarget, args: { input: unknown[]; prompt: string; plan: WebPlan; limit: number; calibration: number; round: number; signal: AbortSignal; activity: (add: () => void) => void }): Promise<number> {
+    const { input, limit, calibration } = args;
+    const estimate = () => this.counter.count({ instructions: args.prompt, tools: args.plan.tools, input }).tokens;
+    const measure = (item: unknown) => this.counter.count({ instructions: '', tools: [], input: [item] }).tokens;
+    const persist = () => this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
+    const before = estimate();
+    if (before * calibration < limit * COMPACT_AT) return before;
+    const cleared = maskObservations(input, measure, limit * KEEP_RECENT / calibration);
+    let after = estimate();
+    if (cleared) {
+      persist();
+      args.activity(() => this.store.addMessage(conversationId, 'tool', `Cleared ${cleared} older tool output${cleared === 1 ? '' : 's'} to free context (${kilo(before * calibration)} → ${kilo(after * calibration)} tokens). The assistant can reread them.`, 'completed', undefined, 'compaction'));
+    }
+    let summarized = false;
+    if (after * calibration >= limit * SUMMARIZE_ABOVE) {
+      const { head, tail } = splitForSummary(input, measure, limit * SUMMARY_TAIL / calibration);
+      if (head.reduce((total: number, item) => total + measure(item), 0) * calibration >= limit * SUMMARY_MIN_HEAD) {
+        let row!: ReturnType<Store['addMessage']>;
+        args.activity(() => { row = this.store.addMessage(conversationId, 'tool', 'Summarizing earlier conversation to free context…', 'running', undefined, 'compaction'); });
+        try {
+          let transcript = transcriptText(head);
+          const budget = limit * SUMMARY_INPUT / calibration;
+          const requestTokens = () => this.counter.count({ instructions: SUMMARY_INSTRUCTIONS, tools: [], input: summaryRequest(transcript) }).tokens;
+          for (let tokens = requestTokens(); tokens > budget && transcript.length > 1_000; tokens = requestTokens())
+            transcript = `[Oldest part of the transcript omitted]\n${transcript.slice(-Math.floor(transcript.length * budget / tokens * 0.9))}`;
+          const response = await this.stream(target, { input: summaryRequest(transcript), instructions: SUMMARY_INSTRUCTIONS, plan: { ...args.plan, hosted: false, tools: [] }, signal: args.signal, onText: () => undefined, onWebSearch: () => undefined });
+          const summary = outputText(response.output);
+          if (!summary) throw new Error('The model returned an empty summary.');
+          if (args.signal.aborted) throw new Error('Turn stopped.');
+          input.splice(0, input.length, ...compactedHistory(summary, input[latestUserIndex(input)], tail)); persist();
+          const previous = after; after = estimate(); summarized = true;
+          row.status = 'completed'; row.text = `Summarized earlier conversation to free context (${kilo(previous * calibration)} → ${kilo(after * calibration)} tokens):\n\n${summary}`; this.store.updateMessage(row);
+        } catch (error) {
+          const stopped = args.signal.aborted;
+          row.status = stopped ? 'cancelled' : 'failed';
+          row.text = stopped ? 'Context summary stopped.' : `Context summary failed; continuing with cleared tool outputs. ${redactText(error instanceof Error ? error.message : 'Summary request failed.')}`;
+          this.store.updateMessage(row);
+          if (stopped) throw error;
+        }
+      }
+    }
+    this.diagnostics.record('chat.compacted', { conversationId, round: args.round, before, after, cleared, summarized, calibration });
+    return after;
   }
   private permitted(conversationId: string, connectionId: string, turn: Turn): AccessMode {
     const frozen = turn.targets.get(connectionId);
@@ -280,6 +351,23 @@ export class ChatService {
           const page = await webFetch(url, { startChar, signal: turn.controller.signal });
           result = page;
           summary = `${page.finalUrl}${page.title ? ` — ${page.title}` : ''} (${page.text.length.toLocaleString()} chars${page.nextStartChar === undefined ? '' : ', more available'})`; break;
+        }
+        case 'recall_tool_output': {
+          let id = string('callId');
+          let entry = this.store.toolCall(id);
+          let start = Number.isInteger(args.startChar) ? Math.max(0, args.startChar as number) : undefined;
+          // A cleared recall points at its own call; reread the original output instead of nesting it.
+          for (let depth = 0; entry?.name === 'recall_tool_output' && depth < 5; depth++) {
+            const earlier = JSON.parse(entry.args) as { callId?: unknown; startChar?: unknown };
+            if (typeof earlier.callId !== 'string') break;
+            id = earlier.callId; entry = this.store.toolCall(id);
+            if (start === undefined && Number.isInteger(earlier.startChar)) start = Math.max(0, earlier.startChar as number);
+          }
+          if (!entry || entry.conversationId !== conversationId || entry.result === null) throw new Error('No stored output for that tool call in this conversation.');
+          start ??= 0;
+          const text = entry.result.slice(start, start + RECALL_CHARS);
+          result = { callId: id, name: entry.name, text, ...(start + RECALL_CHARS < entry.result.length ? { nextStartChar: start + RECALL_CHARS } : {}) };
+          summary = `${entry.name} [${id}] — ${text.length.toLocaleString()} chars`; break;
         }
         default: throw new Error('Unknown assistant tool.');
       }

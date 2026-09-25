@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store';
 import { secretName, type SecureStore } from './providers/secrets';
 import type { ChatModelEntry, ChatModelOption } from '../shared/types';
-import { CHAT_MODELS, CODEX_EFFORTS, DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/chat-models';
+import { CHAT_MODELS, CODEX_EFFORTS, DEFAULT_CONTEXT_LIMIT, DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/chat-models';
 import {
   effortsKey,
   isProviderKind,
@@ -137,12 +137,12 @@ export class ChatRegistry {
 
   options(): ChatModelOption[] {
     // Codex models always have the hosted web_search tool.
-    const entries: ChatModelOption[] = CHAT_MODELS.map(entry => ({ id: `codex:${entry.id}`, label: `Codex:${entry.id}`, providerLabel: 'Codex', slug: entry.id, efforts: [...entry.efforts], builtIn: true, hostedSearch: true }));
-    for (const slug of this.codexModels()) entries.push({ id: `codex:${slug}`, label: `Codex:${slug}`, providerLabel: 'Codex', slug, efforts: [...CODEX_EFFORTS], builtIn: false, hostedSearch: true });
+    const entries: ChatModelOption[] = CHAT_MODELS.map(entry => ({ id: `codex:${entry.id}`, label: `Codex:${entry.id}`, providerLabel: 'Codex', slug: entry.id, efforts: [...entry.efforts], builtIn: true, hostedSearch: true, contextLimit: entry.contextLimit }));
+    for (const slug of this.codexModels()) entries.push({ id: `codex:${slug}`, label: `Codex:${slug}`, providerLabel: 'Codex', slug, efforts: [...CODEX_EFFORTS], builtIn: false, hostedSearch: true, contextLimit: DEFAULT_CONTEXT_LIMIT });
     for (const model of this.models()) {
       const provider = this.providers().find(entry => entry.id === model.providerId);
       if (!provider) continue;
-      entries.push({ id: model.id, label: `${provider.label}:${model.slug}`, providerLabel: provider.label, slug: model.slug, efforts: model.efforts, builtIn: false, hostedSearch: Boolean(model.hostedSearch) });
+      entries.push({ id: model.id, label: `${provider.label}:${model.slug}`, providerLabel: provider.label, slug: model.slug, efforts: model.efforts, builtIn: false, hostedSearch: Boolean(model.hostedSearch), contextLimit: model.contextLimit ?? DEFAULT_CONTEXT_LIMIT });
     }
     return entries;
   }
@@ -207,11 +207,18 @@ export class ChatRegistry {
     return outcome;
   }
 
-  async saveModel(input: { id?: string; providerId: string; slug: string; efforts: string[] }): Promise<ChatModelEntry> {
+  /** Context window used for compaction and the context meter. */
+  contextLimit(target: ResolvedChatTarget): number {
+    if (target.kind === 'codex') return CHAT_MODELS.find(entry => entry.id === target.slug)?.contextLimit ?? DEFAULT_CONTEXT_LIMIT;
+    return target.record?.contextLimit ?? DEFAULT_CONTEXT_LIMIT;
+  }
+
+  async saveModel(input: { id?: string; providerId: string; slug: string; efforts: string[]; contextLimit: number }): Promise<ChatModelEntry> {
     const provider = this.providers().find(entry => entry.id === input.providerId);
     if (!provider) throw new Error('Chat provider not found.');
     const slug = normalizeSlug(input.slug);
     const efforts = normalizeEfforts(input.efforts);
+    if (!Number.isInteger(input.contextLimit) || input.contextLimit < 8_000 || input.contextLimit > 10_000_000) throw new Error('Context window must be 8,000–10,000,000 tokens.');
     const key = await this.providerKey(input.providerId);
     const pending = this.pending.get(this.pendingKey(provider, slug, efforts));
     if (!pending || this.now() - pending.at > TEST_TTL_MS || pending.keyPresent !== Boolean(key?.trim()) || pending.outcome.failedEfforts.length) {
@@ -225,6 +232,7 @@ export class ChatRegistry {
       slug,
       efforts,
       maxTokens: pending.outcome.maxTokens,
+      contextLimit: input.contextLimit,
       vision: pending.outcome.vision,
       audio: pending.outcome.audio,
       hostedSearch: pending.outcome.hostedSearch,

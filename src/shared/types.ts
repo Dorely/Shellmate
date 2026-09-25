@@ -29,9 +29,9 @@ export interface ElevationRequest { id: string; sessionId: string; connectionId:
 export type GenericProviderKind = 'chat-completions' | 'responses' | 'anthropic';
 export interface ChatProviderEntry { id: string; label: string; baseUrl: string; kind: GenericProviderKind }
 export type CapabilityFlag = true | false | 'unknown';
-export interface ChatModelEntry { id: string; providerId: string; slug: string; efforts: string[]; maxTokens: number | null; vision: CapabilityFlag; audio: CapabilityFlag; hostedSearch: string | null; effortResults: Record<string, 'pass' | 'fail'>; lastTestedAt: string; testError?: string }
+export interface ChatModelEntry { id: string; providerId: string; slug: string; efforts: string[]; maxTokens: number | null; contextLimit?: number; vision: CapabilityFlag; audio: CapabilityFlag; hostedSearch: string | null; effortResults: Record<string, 'pass' | 'fail'>; lastTestedAt: string; testError?: string }
 export interface ActiveChatSelection { modelId: string; effort: string }
-export interface ChatModelOption { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean; hostedSearch: boolean }
+export interface ChatModelOption { id: string; label: string; providerLabel: string; slug: string; efforts: string[]; builtIn: boolean; hostedSearch: boolean; contextLimit: number }
 export interface ModelCapabilityResult { perEffort: Record<string, 'pass' | 'fail'>; failedEfforts: string[]; maxTokens: number | null; vision: CapabilityFlag; audio: CapabilityFlag; hostedSearch: string | null; error?: string }
 export type SearchBackendId = 'serpapi' | 'tavily';
 export interface WebSearchStatus { backend: SearchBackendId | null; keys: Record<SearchBackendId, boolean> }
@@ -50,7 +50,7 @@ export interface ShellmateApi {
   startLogin(): Promise<void>; cancelLogin(): Promise<void>; logout(): Promise<void>;
   saveChatProvider(input: { id?: string; label: string; baseUrl: string; kind: GenericProviderKind; apiKey?: string; keyAction?: 'keep' | 'replace' | 'remove' }): Promise<ChatProviderEntry>;
   deleteChatProvider(id: string): Promise<void>; listChatModels(providerId: string): Promise<string[]>; testChatModel(input: { providerId: string; slug: string; efforts: string[] }): Promise<ModelCapabilityResult>;
-  saveChatModel(input: { id?: string; providerId: string; slug: string; efforts: string[] }): Promise<ChatModelEntry>; deleteChatModel(id: string): Promise<void>; setActiveChat(input: ActiveChatSelection): Promise<void>;
+  saveChatModel(input: { id?: string; providerId: string; slug: string; efforts: string[]; contextLimit: number }): Promise<ChatModelEntry>; deleteChatModel(id: string): Promise<void>; setActiveChat(input: ActiveChatSelection): Promise<void>;
   saveWebSearch(input: { backend: SearchBackendId | null; apiKey?: string; keyAction?: 'keep' | 'replace' | 'remove' }): Promise<void>; testWebSearch(): Promise<number>; openExternal(url: string): Promise<void>;
   testCodexModel(slug: string): Promise<void>; saveCodexModel(input: { id?: string; slug: string }): Promise<void>; deleteCodexModel(id: string): Promise<void>;
   onChanged(callback: () => void): () => void; onTerminal(callback: (event: { id: string; seq: number; data: string }) => void): () => void;

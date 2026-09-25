@@ -63,3 +63,12 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - The generated POSIX bootstrap ran in Git Bash `bash -i` and `sh -i`. Each prompt emitted the option flags before the exit code; `e` appeared after `set -e` and cleared after `set +e`.
 - The likely-cause pattern matched `set -e; …`, `set -euo pipefail`, and `&& exit 1`. It did not match `docker exec`, `find -exec`, or `bash -c "set -e; …"`.
 - Not verified: the `disconnected` result and errexit note in a live app turn, and zsh.
+
+2026-09-25 mid-turn context compaction:
+
+- `npm run typecheck` and `npm run build` passed.
+- A standalone bundle of `compaction.ts` cleared only older outputs, left the latest round intact, and started the summary tail at a round boundary. It also quoted the current request when the tail no longer held it and read Responses, Chat Completions, and Anthropic usage fields.
+- `npm run browser`, Codex `gpt-6-sol` high, with the Codex window temporarily forced to 24,000 tokens (reverted before commit). Local was added to the Default workspace as Autonomous. The model ran four large-output PowerShell commands, then was asked for the fifth file from command (1). Over about 20 rounds the turn cleared outputs and summarized several times, and the summaries showed in the chat. It called `recall_tool_output` and completed with the correct answer, `@AppHelpToast.png`, 232 bytes. Command (1)'s stored output was already cut to its last 32k characters by the terminal limit, so the model reran a five-file listing to confirm. The run showed that summarizing a small head did not shrink the context (13k → 13k). A minimum head size of 15% of the window was added, the context meter was scaled by the calibration, and cleared recalls were made to resolve to the original output.
+- After a restart, a follow-up turn in the same conversation paged a cleared result back through `recall_tool_output` (20,000 and then 12,349 characters). It listed the four earlier commands without running new ones.
+- The provider screen showed the Context window field prefilled with 272000. No API provider was configured, so saving a model's context window, overflow-error retry, and compaction on Anthropic, Responses, and Chat Completions were not verified live.
+- Local was removed from the Default workspace again and the browser-mode app was stopped.

@@ -15,6 +15,8 @@ export interface ChatModelRecord {
   slug: string;
   efforts: string[];
   maxTokens: number | null;
+  /** User-set context window in tokens; compaction and the context meter use it. */
+  contextLimit?: number;
   vision: CapabilityFlag;
   audio: CapabilityFlag;
   /** Provider-hosted web search tool type that passed the capability probe, or null. */

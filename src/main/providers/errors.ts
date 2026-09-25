@@ -62,6 +62,15 @@ export class ProviderResponseError extends ProviderHttpError {
   }
 }
 
+const CONTEXT_OVERFLOW = /context_length_exceeded|prompt is too long|input is too long|too many (input )?tokens|maximum context|context (window|length)|exceeds? the (model's )?(context|maximum)/i;
+
+/** True when a provider rejected the request because the prompt exceeds the model's context window. */
+export function isContextOverflow(error: unknown): boolean {
+  if (!(error instanceof ProviderHttpError) || (error.status !== undefined && error.status !== 400 && error.status !== 413)) return false;
+  const { code, type, message } = error.details;
+  return [code, type, message].some(value => value !== undefined && CONTEXT_OVERFLOW.test(value));
+}
+
 /** Returns only fields safe for structured diagnostics. */
 export function diagnosticError(error: unknown): Record<string, unknown> {
   if (error instanceof ProviderHttpError) {

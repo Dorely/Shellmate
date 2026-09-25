@@ -22,10 +22,11 @@ Read this map at the start of each development session. Generated output, depend
 | `src/main/shell-integration.ts` | PowerShell/bash/zsh/sh prompt hooks, bootstrap lines, command keystrokes, and the nonce-tagged OSC parser. |
 | `src/main/local-pty.ts` | `LocalPtyHost`: starts the PTY utility process, routes spawn/write/resize/kill messages, and strips debugger env. |
 | `src/main/pty-host.ts` | Utility-process entry that owns node-pty ConPTY terminals off the main thread. |
-| `src/main/chat-service.ts`, `src/main/assistant.ts` | Persistent streaming turns, workspace-scoped terminal/web tools and approvals, prompt, cancellation, and context accounting. |
+| `src/main/chat-service.ts`, `src/main/assistant.ts` | Persistent streaming turns, workspace-scoped terminal/web/recall tools and approvals, prompt, cancellation, context accounting, and per-round compaction. |
+| `src/main/compaction.ts` | Pure history compaction: tool-output clearing, round-safe summary split, transcript rendering, summary prompt, and usage parsing. |
 | `src/main/web-search.ts` | App-owned `web_search` backends (SerpApi, Tavily) with keys in SecureStore. |
 | `src/main/web-fetch.ts` | `web_fetch`: SSRF-guarded public page fetch with redirect, size, and time limits, converted to text. |
-| `src/main/chat-registry.ts`, `src/main/chat-context.ts` | Provider/model registry, selection, capability testing, and token estimates. |
+| `src/main/chat-registry.ts`, `src/main/chat-context.ts` | Provider/model registry, selection, capability testing, context windows, and token estimates. |
 | `src/main/diagnostics.ts` | Redacted local diagnostics. |
 | `src/main/providers/auth.ts`, `codex.ts`, `secrets.ts`, `errors.ts` | Codex OAuth/transport, encrypted credentials, and provider error handling. |
 | `src/main/providers/generic/` | Chat Completions, Responses, Anthropic (incl. built-in web search and citations), SSE, registry validation, and capability probes. |

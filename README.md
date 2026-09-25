@@ -10,6 +10,7 @@ Shellmate is a Windows-first desktop remote connection manager. It pairs visible
 - Codex account chat, generic Chat Completions, Responses, and Anthropic providers. API keys and OAuth tokens use Electron OS-backed encryption.
 - Workspace connections are available to every conversation in that workspace, with disabled, ask-before-command, or autonomous access. A terminal an assistant uses is locked for the turn; user takeover stops further assistant dispatch.
 - Per-workspace web access (Disabled, Ask, Autonomous) for web search, page fetches, and clickable cited sources.
+- Automatic context compaction between tool rounds: older tool outputs are cleared (the assistant can reread them), then older history is replaced by a summary shown in the chat. API models have an editable context window (default 272,000 tokens).
 - A header theme selector offers Graphite, Light, and Forest. The provider screen supports tested custom Codex models alongside built-in models and API providers.
 
 This is a fresh application profile. The earlier .NET database at `Shellmate/shellmate.db` is neither read nor changed. The new profile lives under the operating system's Electron `Shellmate` user-data directory.
