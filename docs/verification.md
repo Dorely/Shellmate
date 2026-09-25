@@ -55,3 +55,11 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - Disabled mode: the model listed no web tools and declined to fetch.
 - Providers → Web search rendered the None/SerpApi/Tavily selector and key field. No search key was entered, so SerpApi, Tavily, and app-owned `web_search` were not exercised. No Anthropic, generic Responses, or Chat Completions provider was configured, so their built-in search, citations, `pause_turn` handling, the Anthropic and Chat Completions tool-shape fixes, and the Responses `reasoning.effort` change were not verified live.
 - The Web mode was restored to Ask and the browser-mode app was stopped.
+
+2026-09-24 shell-exit reporting and uncapped tool rounds:
+
+- Cause: in a live Plex-Server chat, two `set -e; python3 … PY; docker compose …` commands failed in the shared login shell. errexit exited bash, the SSH channel closed, and the assistant saw only `interrupted` with empty output. Piping `set -e` and then a failing `{ …; }` group into Git Bash `bash -i` confirmed that the next line never ran.
+- `npm run typecheck` and `npm run build` passed.
+- The generated POSIX bootstrap ran in Git Bash `bash -i` and `sh -i`. Each prompt emitted the option flags before the exit code; `e` appeared after `set -e` and cleared after `set +e`.
+- The likely-cause pattern matched `set -e; …`, `set -euo pipefail`, and `&& exit 1`. It did not match `docker exec`, `find -exec`, or `bash -c "set -e; …"`.
+- Not verified: the `disconnected` result and errexit note in a live app turn, and zsh.

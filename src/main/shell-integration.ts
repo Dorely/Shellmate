@@ -1,8 +1,9 @@
-// Invisible shell integration: prompt hooks report prompt, command start, exit code, and cwd through
-// nonce-tagged OSC 7717 sequences, so agent commands can be typed exactly as a user would type them.
-export type IntegrationEvent = { kind: 'A' | 'B' | 'C' | 'D' | 'P'; arg: string; index: number };
+// Invisible shell integration: prompt hooks report prompt, command start, exit code, cwd, and POSIX option flags
+// through nonce-tagged OSC 7717 sequences, so agent commands can be typed exactly as a user would type them.
+// Option flags (O) precede the exit code (D) so a finishing command sees the shell's current options, such as errexit.
+export type IntegrationEvent = { kind: 'A' | 'B' | 'C' | 'D' | 'O' | 'P'; arg: string; index: number };
 const OSC = '\x1b]7717;';
-const KINDS = new Set(['A', 'B', 'C', 'D', 'P']);
+const KINDS = new Set(['A', 'B', 'C', 'D', 'O', 'P']);
 const CLEAR_SCREEN = '\\033[H\\033[2J\\033[3J';
 
 const powershellScript = (nonce: string, clear: boolean) => `if (-not $global:__sm_nonce) {
@@ -28,7 +29,7 @@ if (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Silentl
 const bashScript = (nonce: string) => `if [ -z "$__sm_nonce" ]; then
 __sm_nonce=${nonce}
 __sm_osc() { builtin printf '\\033]7717;%s;%s;%s\\007' "$__sm_nonce" "$1" "$2"; }
-__sm_pre() { local __sm_st=$?; __sm_osc D "$__sm_st"; __sm_osc P "$PWD"; return $__sm_st; }
+__sm_pre() { local __sm_st=$?; __sm_osc O "$-"; __sm_osc D "$__sm_st"; __sm_osc P "$PWD"; return $__sm_st; }
 __sm_post() { case "$PS1" in *"7717;$__sm_nonce;A"*) ;; *) PS1="\\[\\e]7717;$__sm_nonce;A;\\a\\]$PS1\\[\\e]7717;$__sm_nonce;B;\\a\\]";; esac; }
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then PROMPT_COMMAND=(__sm_pre "\${PROMPT_COMMAND[@]}" __sm_post); else PROMPT_COMMAND="__sm_pre"$'\\n'"\${PROMPT_COMMAND:+$PROMPT_COMMAND$'\\n'}__sm_post"; fi
 PS0="\${PS0}\\e]7717;$__sm_nonce;C;\\a"
@@ -39,7 +40,7 @@ __sm_h=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null); case "$__sm_h" in *"$__
 const zshScript = (nonce: string) => `if [ -z "$__sm_nonce" ]; then
 __sm_nonce=${nonce}
 __sm_osc() { builtin printf '\\033]7717;%s;%s;%s\\007' "$__sm_nonce" "$1" "$2"; }
-__sm_pre() { local __sm_st=$?; __sm_osc D "$__sm_st"; __sm_osc P "$PWD"; return $__sm_st; }
+__sm_pre() { local __sm_st=$?; __sm_osc O "$-"; __sm_osc D "$__sm_st"; __sm_osc P "$PWD"; return $__sm_st; }
 __sm_post() { [[ "$PS1" == *"7717;$__sm_nonce;A"* ]] || PS1=$'%{\\e]7717;'"$__sm_nonce"$';A;\\a%}'"$PS1"$'%{\\e]7717;'"$__sm_nonce"$';B;\\a%}'; }
 __sm_exec() { __sm_osc C ''; }
 precmd_functions=(__sm_pre $precmd_functions __sm_post); preexec_functions+=(__sm_exec)
@@ -48,7 +49,7 @@ fi
 
 const shScript = (nonce: string) => `if [ -z "$__sm_nonce" ]; then
 __sm_nonce=${nonce}
-PS1="$(printf '\\033]7717;%s;D;' "$__sm_nonce")"'$?'"$(printf '\\007\\033]7717;%s;P;' "$__sm_nonce")"'$PWD'"$(printf '\\007\\033]7717;%s;A;\\007' "$__sm_nonce")$PS1$(printf '\\033]7717;%s;B;\\007' "$__sm_nonce")"
+PS1="$(printf '\\033]7717;%s;O;' "$__sm_nonce")"'$-'"$(printf '\\007\\033]7717;%s;D;' "$__sm_nonce")"'$?'"$(printf '\\007\\033]7717;%s;P;' "$__sm_nonce")"'$PWD'"$(printf '\\007\\033]7717;%s;A;\\007' "$__sm_nonce")$PS1$(printf '\\033]7717;%s;B;\\007' "$__sm_nonce")"
 fi
 `;
 

@@ -141,7 +141,7 @@ export class ChatService {
       this.store.setSetting(`history/${conversationId}`, JSON.stringify(input));
       const prompt = this.chatInstructions(conversationId, await this.webPlan(conversationId, target, turn), turn);
       const live: { input: unknown[]; text: string; instructions: string; tools: unknown[]; model: string } = { input, text: '', instructions: prompt, tools: [], model: target.slug }; this.live.set(conversationId, live);
-      for (; round < 30 && !turn.controller.signal.aborted; round++) {
+      for (; !turn.controller.signal.aborted; round++) {
         const plan = await this.webPlan(conversationId, target, turn); live.tools = plan.tools;
         const response = await this.stream(target, { input, instructions: prompt, plan, signal: turn.controller.signal,
           onText: chunk => { live.text += chunk; message.text += chunk; this.store.updateMessage(message); },
@@ -162,7 +162,6 @@ export class ChatService {
         if (!response.calls.length || turn.controller.signal.aborted) break;
         message = this.store.addMessage(conversationId, 'assistant', '', 'running');
       }
-      if (round >= 30 && !turn.controller.signal.aborted) { message.text += '\nTool limit reached. Send another message to continue.'; message.status = 'completed'; this.store.updateMessage(message); }
       if (turn.controller.signal.aborted && message.status === 'running') { message.status = 'cancelled'; message.text += '\nResponse stopped.'; this.store.updateMessage(message); }
       this.store.setTurn(conversationId, turn.controller.signal.aborted ? 'cancelled' : 'completed');
     } catch (error) {

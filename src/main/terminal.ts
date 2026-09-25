@@ -11,7 +11,7 @@ import type { Store } from './store';
 
 type Backend = { write(data: string): void; resize(cols: number, rows: number): void; close(): void };
 type Command = { id: string; text: string; input: string; capture: string; started: boolean; startedAt: number; interrupt: NodeJS.Timeout | null; resolve: (result: CommandResult) => void; completed: Promise<CommandResult> };
-export interface CommandResult { id: string; status: 'completed' | 'failed' | 'running' | 'interrupted'; exitCode: number | null; output: string; truncated: boolean; note?: string }
+export interface CommandResult { id: string; status: 'completed' | 'failed' | 'running' | 'interrupted' | 'disconnected'; exitCode: number | null; output: string; truncated: boolean; note?: string }
 export interface CommandProgress { id: string; command: string; running: boolean; elapsedSeconds: number; exitCode: number | null; output: string; truncated: boolean }
 type ShellState = 'starting' | 'prompt' | 'input' | 'running';
 // A typed bootstrap line whose echo stays hidden until the integrated prompt appears.
@@ -20,7 +20,7 @@ type Session = {
   id: string; workspaceId: string; connectionId: string; shell: ShellKind; backend: Backend; output: string; seq: number; owner: TerminalOwnership | null; command: Command | null; turnFinished: boolean; error: string | null;
   elevation: ElevationRequest | null; elevationCheck: NodeJS.Timeout | null; redact: { text: string; until: number } | null;
   integration: TerminalIntegration; integrationDetail: string | null; integrationTimer: NodeJS.Timeout | null; parser: IntegrationParser; bootstrap: Bootstrap | null;
-  state: ShellState; cwd: string | null; lastExitCode: number | null; bracketedPaste: boolean;
+  state: ShellState; cwd: string | null; lastExitCode: number | null; bracketedPaste: boolean; errexit: boolean;
   lastCommand: CommandProgress | null;
 };
 type Integration = { integration: TerminalIntegration; detail: string | null; launchArgs: string[]; bootstrap: { line: string; keepBanner: boolean } | null };
@@ -28,6 +28,9 @@ const OUTPUT_LIMIT = 160_000;
 const COMMAND_LIMIT = 32_000;
 const INTERRUPT_WAIT_MS = 5_000;
 const PASSWORD_PROMPT = /(?:^|\n)([^\n]*\b(?:password|passphrase)\b[^\n]*:)[ \t]*$/i;
+// Shell-level commands that end the shared interactive shell when typed directly into it.
+const SHELL_ENDING = /(?:^|[;&|({\n])\s*(?:set\s+-[a-zA-Z]*e|set\s+-o\s+errexit|exit\b|exec\b|logout\b)/;
+const ERREXIT_NOTE = 'errexit (set -e) is now on in this shared interactive shell, so the next failing command will exit the shell and disconnect the terminal. Run `set +e` before continuing.';
 // Terminal query replies and focus reports that xterm sends without the user typing.
 const DEVICE_ATTRIBUTES = '\x1b[c';
 const TERMINAL_REPLY = /^(?:\x1B\[(?:[\d;?]*[Rcnt]|[IO]))+$/;
@@ -109,7 +112,7 @@ export class TerminalManager {
     }
     session = { id: randomUUID(), workspaceId, connectionId, shell, backend, output: '', seq: 0, owner: null, command: null, turnFinished: false, error: null,
       elevation: null, elevationCheck: null, redact: null, integration: integration.integration, integrationDetail: integration.detail, integrationTimer: null,
-      parser: new IntegrationParser(nonce), bootstrap: null, state: 'starting', cwd: null, lastExitCode: null, bracketedPaste: false, lastCommand: null };
+      parser: new IntegrationParser(nonce), bootstrap: null, state: 'starting', cwd: null, lastExitCode: null, bracketedPaste: false, errexit: false, lastCommand: null };
     this.sessions.set(this.key(workspaceId, connectionId), session); this.changed();
     if (integration.bootstrap) this.beginBootstrap(session, integration.bootstrap.line, integration.bootstrap.keepBanner);
     else if (integration.integration === 'pending') {
@@ -160,13 +163,18 @@ export class TerminalManager {
     if (allow) { const profile = this.store.connection(request.connectionId); if (profile.host !== request.host || profile.port !== request.port) throw new Error('Connection changed while awaiting host-key trust.'); profile.trustedHostKey = request.fingerprint; profile.updatedAt = new Date().toISOString(); this.store.saveConnection(profile); }
     this.changed(); return request;
   }
-  private release(s: Session) {
+  private release(s: Session, exitReason?: string) {
     for (const timer of [s.integrationTimer, s.elevationCheck, s.bootstrap?.quiet, s.bootstrap?.timer, s.command?.interrupt]) if (timer) clearTimeout(timer);
-    if (s.command) s.command.resolve({ id: s.command.id, status: 'interrupted', exitCode: null, output: '', truncated: false });
+    const command = s.command; if (!command) return;
+    if (!exitReason) { command.resolve({ ...this.partial(command), status: 'interrupted' }); return; }
+    const cause = s.errexit || SHELL_ENDING.test(command.text)
+      ? 'It most likely exited because this command (or an earlier one) ran `set -e`, `exit`, or `exec` directly in the shared shell. Put such scripts in a subshell `( … )` or `bash -c`.'
+      : 'The remote shell or connection closed.';
+    command.resolve({ ...this.partial(command), status: 'disconnected', note: `The shell exited before this command finished (${exitReason}). ${cause} The command may have partly run. Use connect_terminal for a fresh shell; cwd and variables are lost.` });
   }
   private exited(workspaceId: string, connectionId: string, reason: string) {
     const key = this.key(workspaceId, connectionId); const s = this.sessions.get(key); if (!s) return;
-    this.sessions.delete(key); s.error = reason; this.release(s); this.changed();
+    this.sessions.delete(key); s.error = reason; this.release(s, reason); this.changed();
   }
   disconnect(workspaceId: string, connectionId: string, force = false) {
     const s = this.session(workspaceId, connectionId); if (!s) return;
@@ -286,7 +294,7 @@ export class TerminalManager {
       b.quiet = setTimeout(() => this.sendBootstrap(s), 400);
       return;
     }
-    for (const event of events) if (event.kind === 'P') s.cwd = event.arg || null;
+    for (const event of events) if (event.kind === 'P' || event.kind === 'O') this.event(s, event);
     const prompt = events.find(event => event.kind === 'A');
     if (!prompt) { b.after = limit(b.after + text, OUTPUT_LIMIT); return; }
     // Show the banner without the pre-integration prompt line, then continue from the integrated prompt.
@@ -313,6 +321,7 @@ export class TerminalManager {
   }
   private event(s: Session, event: IntegrationEvent) {
     if (event.kind === 'P') { s.cwd = event.arg || null; return; }
+    if (event.kind === 'O') { s.errexit = event.arg.includes('e'); return; }
     if (event.kind === 'A' || event.kind === 'B') {
       if (s.integration === 'pending') { if (s.integrationTimer) clearTimeout(s.integrationTimer); s.integration = 'ready'; s.integrationDetail = null; s.integrationTimer = null; this.changed(); }
       if (!s.command) this.setState(s, 'prompt');
@@ -334,7 +343,7 @@ export class TerminalManager {
     let output = plain(command.capture);
     if (!command.started) output = withoutEcho(output, command.input);
     output = output.trim();
-    const result: CommandResult = { id: command.id, status: exitCode === 0 ? 'completed' : 'failed', exitCode, output: limit(output, COMMAND_LIMIT), truncated: output.length > COMMAND_LIMIT };
+    const result: CommandResult = { id: command.id, status: exitCode === 0 ? 'completed' : 'failed', exitCode, output: limit(output, COMMAND_LIMIT), truncated: output.length > COMMAND_LIMIT, ...(s.errexit ? { note: ERREXIT_NOTE } : {}) };
     if (command.interrupt) clearTimeout(command.interrupt);
     s.command = null; s.lastExitCode = exitCode; s.lastCommand = this.progressOf(command, result); s.redact = null; this.clearElevation(s);
     if (s.turnFinished || s.owner?.phase === 'returning-control') s.owner = null;
