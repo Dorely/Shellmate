@@ -14,8 +14,10 @@ import { DiagnosticLog, redactText } from './diagnostics';
 import { diagnosticError } from './providers/errors';
 import { startBrowserHost, type BrowserHost } from './browser-host';
 import type { ConnectionInput, ConnectionProfile, Snapshot } from '../shared/types';
+import icon from '../../build/icon.ico?asset';
 
 app.setName('Shellmate');
+app.setAppUserModelId('com.dorely.shellmate');
 app.setPath('userData', join(app.getPath('appData'), 'Shellmate'));
 const browserMode = !app.isPackaged && process.argv.includes('--browser');
 let window: BrowserWindow | null = null;
@@ -153,7 +155,7 @@ else {
       process.stdout.write(`Shellmate browser: ${browserHost.url}\n`);
     } else {
       const startupBackground = themeBackgrounds[store.setting('ui-theme', 'graphite') as keyof typeof themeBackgrounds] ?? themeBackgrounds.graphite;
-      window = new BrowserWindow({ width: 1500, height: 960, minWidth: 950, minHeight: 650, title: 'Shellmate', show: false, backgroundColor: startupBackground, webPreferences: {
+      window = new BrowserWindow({ width: 1500, height: 960, minWidth: 950, minHeight: 650, title: 'Shellmate', icon, show: false, backgroundColor: startupBackground, webPreferences: {
         preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true
       } });
       window.removeMenu(); window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

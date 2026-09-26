@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 
 type TerminalEvent = { id: string; seq: number; data: string };
 type Invoke = (method: unknown, args: unknown) => Promise<unknown>;
+const contentTypes: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
 export interface BrowserHost {
   url: string;
@@ -18,7 +19,7 @@ export async function startBrowserHost(assetsDir: string, invoke: Invoke): Promi
   const clients = new Set<ServerResponse>();
   let origin = '';
   const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' };
-  const send = (response: ServerResponse, status: number, body: string, type = 'application/json; charset=utf-8') => {
+  const send = (response: ServerResponse, status: number, body: string | Buffer, type = 'application/json; charset=utf-8') => {
     response.writeHead(status, { ...headers, 'content-type': type }); response.end(body);
   };
   const authorized = (request: IncomingMessage) => request.headers.cookie?.split(';').some(part => part.trim() === `shellmate_browser=${session}`) ?? false;
@@ -48,8 +49,7 @@ export async function startBrowserHost(assetsDir: string, invoke: Invoke): Promi
       }
       if (request.method !== 'GET' || !['/', '/index.html'].includes(pathname) && !/^\/assets\/[A-Za-z0-9_.-]+$/.test(pathname)) return send(response, 404, 'Not found', 'text/plain; charset=utf-8');
       const name = pathname === '/' ? 'index.html' : pathname.slice(1);
-      const type = name.endsWith('.js') ? 'text/javascript; charset=utf-8' : name.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8';
-      send(response, 200, (await readFile(join(assetsDir, name))).toString(), type);
+      send(response, 200, await readFile(join(assetsDir, name)), contentTypes[extname(name)] ?? 'application/octet-stream');
     } catch { if (!response.headersSent) send(response, 500, 'Browser host error', 'text/plain; charset=utf-8'); else response.end(); }
   });
   await new Promise<void>((resolve, reject) => server.listen(0, '127.0.0.1', resolve).once('error', reject));

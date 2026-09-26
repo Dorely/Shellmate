@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import type { AccessMode, ChatContext, ChatProviderEntry, ConnectionInput, ConnectionSummary, Conversation, Note, SearchBackendId, Snapshot, TerminalSnapshot, WebSource } from '../shared/types';
 import { readTheme, setTheme, terminalThemes, type ThemeName } from './theme';
 import { DEFAULT_CONTEXT_LIMIT } from '../shared/chat-models';
+import logo from './assets/logo.png';
 
 const api = () => window.shellmate;
 const errorText = (error: unknown) => error instanceof Error ? error.message : 'Operation failed.';
@@ -224,7 +225,7 @@ export default function App() {
   const saveConnection = async (input: ConnectionInput) => { const result = await api().saveConnection(input); await refresh(); if (!result) throw new Error('Connection could not be saved.'); };
   if (!snapshot) return <div className="loading">Loading Shellmate…</div>;
   return <div className="app-shell">
-    <header className="app-header"><div className="brand"><span className="brand-mark">⌘</span><strong>shellmate</strong></div><div className="header-divider" /><select aria-label="Workspace" value={snapshot.activeWorkspaceId} onChange={e => void act(() => api().setActiveWorkspace(e.target.value)).then(() => setSelectedConnection(null))}>{snapshot.workspaces.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button title="Rename workspace" onClick={() => setWorkspaceDialog('rename')}>Rename</button><button title="New workspace" onClick={() => setWorkspaceDialog('create')}>+ Workspace</button><span className="subtle">{workspaceConnections.length} connections</span><span className="fill" />
+    <header className="app-header"><div className="brand"><img className="brand-mark" src={logo} alt="" /><strong>shellmate</strong></div><div className="header-divider" /><select aria-label="Workspace" value={snapshot.activeWorkspaceId} onChange={e => void act(() => api().setActiveWorkspace(e.target.value)).then(() => setSelectedConnection(null))}>{snapshot.workspaces.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button title="Rename workspace" onClick={() => setWorkspaceDialog('rename')}>Rename</button><button title="New workspace" onClick={() => setWorkspaceDialog('create')}>+ Workspace</button><span className="subtle">{workspaceConnections.length} connections</span><span className="fill" />
        <label className="theme-control">Theme <select aria-label="Theme" value={theme} onChange={e => changeTheme(e.target.value as ThemeName)}><option value="graphite">Graphite</option><option value="light">Light</option><option value="forest">Forest</option></select></label><button onClick={() => setShowProviders(true)}>Providers</button>
     </header>
     <div className="work-area" style={{ '--chat-width': `${chatWidth}%` } as React.CSSProperties}>
