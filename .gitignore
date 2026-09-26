@@ -1,9 +1,6 @@
 node_modules/
 out/
 release/
-release-check/
-release-final/
-release-ready/
 .tmp/
 .playwright-mcp/
 .env
