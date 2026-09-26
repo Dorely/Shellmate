@@ -1,7 +1,9 @@
 appId: com.dorely.shellmate
 productName: Shellmate
+copyright: Copyright (c) 2026 Dorely
 directories:
-  output: release-ready
+  output: release
+  buildResources: build
 electronDist: node_modules/electron/dist
 files:
   - out/**/*
@@ -11,10 +13,12 @@ asarUnpack:
   - node_modules/node-pty/**/*
 win:
   target: nsis
+  icon: build/icon.ico
   signAndEditExecutable: false
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
+  artifactName: Shellmate-Setup-${version}.exe
 npmRebuild: false
