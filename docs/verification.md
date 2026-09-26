@@ -87,3 +87,13 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - After a restart, a follow-up turn in the same conversation paged a cleared result back through `recall_tool_output` (20,000 and then 12,349 characters). It listed the four earlier commands without running new ones.
 - The provider screen showed the Context window field prefilled with 272000. No API provider was configured, so saving a model's context window, overflow-error retry, and compaction on Anthropic, Responses, and Chat Completions were not verified live.
 - Local was removed from the Default workspace again and the browser-mode app was stopped.
+
+2026-09-25 v1.0.0 release preparation (logo, release scripts, README):
+
+- `npm run typecheck` and `npm run build` passed; the main bundle emits `chunks/icon-*.ico` for the window icon.
+- Built Electron app driven over the DevTools protocol: the header shows the new logo. A demo workspace (local PowerShell, one note, one "Ask" command approval) produced `docs/images/screenshot.png`. The profile database was backed up first and restored byte-identical afterward.
+- `npm run browser`: the logo PNG is served as `image/png` with its exact byte size, and the header image and favicon load in the browser pane.
+- `npm run release` refused to clear `release/` while another Electron app held old `.asar` handles, as designed, and succeeded once they were released. It produced `release/Shellmate-Setup-1.0.0.exe` and its `.sha256`.
+- With `signExecutable: false` (instead of `signAndEditExecutable: false`), `Shellmate.exe` and the installer both carry the crab icon, and the exe reports ProductName Shellmate, FileVersion 1.0.0, and CompanyName Dorely. Code signing remains skipped.
+- `release/win-unpacked/Shellmate.exe` started and stayed up for 8 seconds, the taskbar showed the crab icon, and the app then closed normally. The NSIS installer itself was not run, to avoid installing on the development host.
+- A history-wide `git log -p` scan for key and token patterns (`sk-`, `tvly-`, JWTs, private-key headers, GitHub and AWS keys) found nothing.
