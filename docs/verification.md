@@ -97,3 +97,9 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - With `signExecutable: false` (instead of `signAndEditExecutable: false`), `Shellmate.exe` and the installer both carry the crab icon, and the exe reports ProductName Shellmate, FileVersion 1.0.0, and CompanyName Dorely. Code signing remains skipped.
 - `release/win-unpacked/Shellmate.exe` started and stayed up for 8 seconds, the taskbar showed the crab icon, and the app then closed normally. The NSIS installer itself was not run, to avoid installing on the development host.
 - A history-wide `git log -p` scan for key and token patterns (`sk-`, `tvly-`, JWTs, private-key headers, GitHub and AWS keys) found nothing.
+
+2026-09-25 assistant Markdown rendering:
+
+- `npm run typecheck` and `npm run build` passed. The renderer bundle grew from about 1.14 MB to 1.52 MB with `react-markdown` and `remark-gfm`.
+- Checked in browser mode on a temporary conversation, deleted afterward, with the previous conversation reactivated. A live Codex reply rendered a heading, bold, italic, strikethrough, inline and fenced code, bullet, numbered, and task lists, a table, a blockquote, and a rule. `ssh <user>@<host>` and `<script>alert(1)</script>` appeared as literal text, with no script element created. The `javascript:` link rendered as plain text, and the image rendered as a link. Clicking the bare URL, the named link, and the image link each called `openExternal` with the https URL, with `openExternal` stubbed so no browser opened.
+- The rendering was inspected in the Graphite, Light, and Forest themes, and the theme was left on Graphite.

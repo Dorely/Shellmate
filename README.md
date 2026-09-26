@@ -38,6 +38,7 @@ Your data stays on your machine in `%APPDATA%\Shellmate`: a SQLite database for 
 - **Notes:** per-connection notes that both you and the assistant can read and write, so machine context is visible and editable instead of hidden memory.
 - **Web access** per workspace (Disabled, Ask, Autonomous) for web search, page fetches, and clickable cited sources.
 - **Long turns:** automatic context compaction between tool rounds. Older tool outputs are cleared (the assistant can reread them), then older history is summarized in the chat. API models have an editable context window (default 272,000 tokens).
+- **Readable replies:** assistant messages render Markdown (lists, tables, code blocks, links). Raw HTML is shown as text, and links open in your browser.
 - **Conversation history** lists conversations newest first; rename or delete them there. The assistant keeps titles short until you name a conversation yourself.
 - Graphite, Light, and Forest themes.
 

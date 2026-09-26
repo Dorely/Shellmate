@@ -42,4 +42,5 @@ Read this map at the start of each development session. Generated output, depend
 | `src/renderer/assets/logo.png` | Generated 128px logo for the header and favicon. |
 | `src/renderer/browser-bridge.ts` | Browser implementation of the fixed Shellmate API over the loopback host. |
 | `src/renderer/App.tsx`, `styles.css` | Workspace UI, chat, terminal tabs/split, notes, connections, provider settings, and approvals. |
+| `src/renderer/AssistantMarkdown.tsx` | Safe GFM Markdown for assistant messages: raw HTML shown as text, web links open externally, images become links. |
 | `src/renderer/theme.ts` | Persisted theme selection and xterm palettes. |
