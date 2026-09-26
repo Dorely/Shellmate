@@ -103,3 +103,9 @@ Live Codex login, generic provider requests, SSH host-key/credential flows, agen
 - `npm run typecheck` and `npm run build` passed. The renderer bundle grew from about 1.14 MB to 1.52 MB with `react-markdown` and `remark-gfm`.
 - Checked in browser mode on a temporary conversation, deleted afterward, with the previous conversation reactivated. A live Codex reply rendered a heading, bold, italic, strikethrough, inline and fenced code, bullet, numbered, and task lists, a table, a blockquote, and a rule. `ssh <user>@<host>` and `<script>alert(1)</script>` appeared as literal text, with no script element created. The `javascript:` link rendered as plain text, and the image rendered as a link. Clicking the bare URL, the named link, and the image link each called `openExternal` with the https URL, with `openExternal` stubbed so no browser opened.
 - The rendering was inspected in the Graphite, Light, and Forest themes, and the theme was left on Graphite.
+
+2026-09-25 themed terminal scrollbar:
+
+- xterm 5.5 draws a native scrollbar on `.xterm-viewport` and has no `scrollbarSlider*` theme options (those arrive with xterm 6), so the fix is a `scrollbar-color` rule using `--scrollbar` and `--terminal-bg`; `theme.ts` is unchanged.
+- `npm run typecheck` and `npm run build` passed.
+- In `npm run browser`, Local PowerShell was connected and `1..120` scrolled output. The viewport's computed `scrollbar-color` and the rendered bar matched each theme: Graphite `#59677b` on `#15191f`, Forest `#53685a` on `#151a19`, Light `#9daec6` on `#ffffff`; no white track remained in the dark themes. Graphite was restored, the session was disconnected, and the app was stopped. The Electron window itself was not checked.
